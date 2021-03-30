@@ -5,6 +5,16 @@ source vim9.vim
 source term_util.vim
 source view_util.vim
 
+def Test_vim9cmd()
+  var lines =<< trim END
+    vim9cmd var x = 123
+    let s:y = 'yes'
+    vim9c assert_equal(123, x)
+    vim9cm assert_equal('yes', y)
+  END
+  CheckScriptSuccess(lines)
+enddef
+
 def Test_edit_wildcards()
   var filename = 'Xtest'
   edit `=filename`
@@ -68,6 +78,17 @@ def Test_expand_alternate_file()
     edit Xfiletwo
     edit %%:r
     assert_equal('Xfileone', bufname())
+
+    assert_false(bufexists('altfoo'))
+    edit altfoo
+    edit bar
+    assert_true(bufexists('altfoo'))
+    assert_true(buflisted('altfoo'))
+    bdel %%
+    assert_true(bufexists('altfoo'))
+    assert_false(buflisted('altfoo'))
+    bwipe! altfoo
+    bwipe! bar
   END
   CheckDefAndScriptSuccess(lines)
 enddef
@@ -302,6 +323,11 @@ def Test_for_linebreak()
   CheckScriptSuccess(lines)
 enddef
 
+def MethodAfterLinebreak(arg: string)
+  arg
+    ->setline(1)
+enddef
+
 def Test_method_call_linebreak()
   var lines =<< trim END
       vim9script
@@ -315,6 +341,110 @@ def Test_method_call_linebreak()
           2,
           3]->RetArg()
       assert_equal([1, 2, 3], res)
+  END
+  CheckScriptSuccess(lines)
+
+  lines =<< trim END
+      new
+      var name = [1, 2]
+      name
+          ->copy()
+          ->setline(1)
+      assert_equal(['1', '2'], getline(1, 2))
+      bwipe!
+  END
+  CheckDefAndScriptSuccess(lines)
+
+  lines =<< trim END
+      new
+      def Foo(): string
+        return 'the text'
+      enddef
+      def Bar(F: func): string
+        return F()
+      enddef
+      def Test()
+        Foo  ->Bar()
+             ->setline(1)
+      enddef
+      Test()
+      assert_equal('the text', getline(1))
+      bwipe!
+  END
+  CheckDefAndScriptSuccess(lines)
+
+  lines =<< trim END
+      new
+      g:shortlist
+          ->copy()
+          ->setline(1)
+      assert_equal(['1', '2'], getline(1, 2))
+      bwipe!
+  END
+  g:shortlist = [1, 2]
+  CheckDefAndScriptSuccess(lines)
+  unlet g:shortlist
+
+  new
+  MethodAfterLinebreak('foobar')
+  assert_equal('foobar', getline(1))
+  bwipe!
+
+  lines =<< trim END
+      vim9script
+      def Foo(): string
+          return '# some text'
+      enddef
+
+      def Bar(F: func): string
+          return F()
+      enddef
+
+      Foo->Bar()
+         ->setline(1)
+  END
+  CheckScriptSuccess(lines)
+  assert_equal('# some text', getline(1))
+  bwipe!
+enddef
+
+def Test_method_call_whitespace()
+  var lines =<< trim END
+    new
+    var yank = 'text'
+    yank->setline(1)
+    yank  ->setline(2)
+    yank->  setline(3)
+    yank  ->  setline(4)
+    assert_equal(['text', 'text', 'text', 'text'], getline(1, 4))
+    bwipe!
+  END
+  CheckDefAndScriptSuccess(lines)
+enddef
+
+def Test_method_and_user_command()
+  var lines =<< trim END
+      vim9script
+      def Cmd()
+        g:didFunc = 1
+      enddef
+      command Cmd g:didCmd = 1
+      Cmd
+      assert_equal(1, g:didCmd)
+      Cmd()
+      assert_equal(1, g:didFunc)
+      unlet g:didFunc
+      unlet g:didCmd
+
+      def InDefFunc()
+        Cmd
+        assert_equal(1, g:didCmd)
+        Cmd()
+        assert_equal(1, g:didFunc)
+        unlet g:didFunc
+        unlet g:didCmd
+      enddef
+      InDefFunc()
   END
   CheckScriptSuccess(lines)
 enddef
@@ -667,6 +797,55 @@ def Test_silent_pattern()
   bwipe!
 enddef
 
+def Test_useless_command_modifier()
+  g:maybe = true
+  var lines =<< trim END
+      if g:maybe
+      silent endif
+  END
+  CheckDefAndScriptFailure(lines, 'E1176:', 2)
+
+  lines =<< trim END
+      for i in [0]
+      silent endfor
+  END
+  CheckDefAndScriptFailure(lines, 'E1176:', 2)
+
+  lines =<< trim END
+      while g:maybe
+      silent endwhile
+  END
+  CheckDefAndScriptFailure(lines, 'E1176:', 2)
+
+  lines =<< trim END
+      silent try
+      finally
+      endtry
+  END
+  CheckDefAndScriptFailure(lines, 'E1176:', 1)
+
+  lines =<< trim END
+      try
+      silent catch
+      endtry
+  END
+  CheckDefAndScriptFailure(lines, 'E1176:', 2)
+
+  lines =<< trim END
+      try
+      silent finally
+      endtry
+  END
+  CheckDefAndScriptFailure(lines, 'E1176:', 2)
+
+  lines =<< trim END
+      try
+      finally
+      silent endtry
+  END
+  CheckDefAndScriptFailure(lines, 'E1176:', 3)
+enddef
+
 def Test_eval_command()
   var from = 3
   var to = 5
@@ -736,6 +915,9 @@ def Test_put_command()
   assert_equal('above', getline(3))
   assert_equal('below', getline(4))
 
+  :2put =['a', 'b', 'c']
+  assert_equal(['ppp', 'a', 'b', 'c', 'above'], getline(2, 6))
+
   # compute range at runtime
   setline(1, range(1, 8))
   @a = 'aaa'
@@ -746,6 +928,10 @@ def Test_put_command()
   :2
   :+2put! a
   assert_equal('aaa', getline(4))
+
+  []->mapnew(() => 0)
+  :$put ='end'
+  assert_equal('end', getline('$'))
 
   bwipe!
 
@@ -919,6 +1105,27 @@ def Test_wincmd()
   endif
   assert_notequal(id1, win_getid())
   close
+
+  split
+  var id = win_getid()
+  split
+  :2wincmd o
+  assert_equal(id, win_getid())
+  only
+
+  split
+  split
+  assert_equal(3, winnr('$'))
+  :2wincmd c
+  assert_equal(2, winnr('$'))
+  only
+
+  split
+  split
+  assert_equal(3, winnr('$'))
+  :2wincmd q
+  assert_equal(2, winnr('$'))
+  only
 enddef
 
 def Test_windo_missing_endif()
@@ -927,5 +1134,43 @@ def Test_windo_missing_endif()
   END
   CheckDefExecFailure(lines, 'E171:', 1)
 enddef
+
+let s:theList = [1, 2, 3]
+
+def Test_lockvar()
+  s:theList[1] = 22
+  assert_equal([1, 22, 3], s:theList)
+  lockvar s:theList
+  assert_fails('theList[1] = 77', 'E741:')
+  unlockvar s:theList
+  s:theList[1] = 44
+  assert_equal([1, 44, 3], s:theList)
+
+  var lines =<< trim END
+      vim9script
+      var theList = [1, 2, 3]
+      def SetList()
+        theList[1] = 22
+        assert_equal([1, 22, 3], theList)
+        lockvar theList
+        theList[1] = 77
+      enddef
+      SetList()
+  END
+  CheckScriptFailure(lines, 'E1119', 4)
+
+  lines =<< trim END
+      var theList = [1, 2, 3]
+      lockvar theList
+  END
+  CheckDefFailure(lines, 'E1178', 2)
+
+  lines =<< trim END
+      var theList = [1, 2, 3]
+      unlockvar theList
+  END
+  CheckDefFailure(lines, 'E1178', 2)
+enddef
+
 
 " vim: ts=8 sw=2 sts=2 expandtab tw=80 fdm=marker

@@ -1083,6 +1083,9 @@ def Test_expr5()
         assert_equal('a0.123', 'a' .. 0.123)
       endif
 
+      assert_equal(3, 1 + [2, 3, 4][0])
+      assert_equal(5, 2 + {key: 3}['key'])
+
       set digraph
       assert_equal('val: true', 'val: ' .. &digraph)
       set nodigraph
@@ -1251,6 +1254,17 @@ def Test_expr5_vim9script()
       echo 'a' .. function('len')
   END
   CheckScriptFailure(lines, 'E729:', 2)
+
+  lines =<< trim END
+      vim9script
+      new
+      ['']->setline(1)
+      /pattern
+
+      eval 0
+      bwipe!
+  END
+  CheckScriptFailure(lines, "E1004: White space required before and after '/' at \"/pattern")
 enddef
 
 def Test_expr5_vim9script_channel()
@@ -1351,13 +1365,14 @@ def Test_expr5_list_add()
   endfor
 
   # concatenating two lists with different member types results in "any"
-  var lines =<< trim END
-      var d = {}
-      for i in ['a'] + [0]
-        d = {[i]: 0}
-      endfor
-  END
-  CheckDefExecFailure(lines, 'E1012:')
+  var dany = {}
+  for i in ['a'] + [12]
+    dany[i] = i
+  endfor
+  assert_equal({a: 'a', 12: 12}, dany)
+
+  # result of glob() is "any", runtime type check
+  var sl: list<string> = glob('*.txt', false, true) + ['']
 enddef
 
 " test multiply, divide, modulo
@@ -1403,6 +1418,9 @@ def Test_expr6()
 
   CheckDefFailure(["var x = 6 * xxx"], 'E1001:', 1)
   CheckDefFailure(["var d = 6 * "], 'E1097:', 3)
+
+  CheckDefExecAndScriptFailure(['echo 1 / 0'], 'E1154', 1)
+  CheckDefExecAndScriptFailure(['echo 1 % 0'], 'E1154', 1)
 enddef
 
 def Test_expr6_vim9script()
@@ -1918,6 +1936,71 @@ def Test_expr7_lambda()
 
   CheckDefSuccess(['var Fx = (a) => [0,', ' 1]'])
   CheckDefFailure(['var Fx = (a) => [0', ' 1]'], 'E696:', 2)
+
+  # no error for existing script variable when checking for lambda
+  lines =<< trim END
+    vim9script
+    var name = 0
+    eval (name + 2) / 3
+  END
+  CheckScriptSuccess(lines)
+enddef
+
+def Test_expr7_lambda_block()
+  var lines =<< trim END
+      var Func = (s: string): string => {
+                      return 'hello ' .. s
+                    }
+      assert_equal('hello there', Func('there'))
+
+      var ll = range(3)
+      var dll = mapnew(ll, (k, v): string => {
+          if v % 2
+            return 'yes'
+          endif
+          return 'no'
+        })
+      assert_equal(['no', 'yes', 'no'], dll)
+
+      sandbox var Safe = (nr: number): number => {
+          return nr + 7
+        }
+      assert_equal(10, Safe(3))
+  END
+  CheckDefAndScriptSuccess(lines)
+
+  lines =<< trim END
+      map([1, 2], (k, v) => { redrawt })
+  END
+  CheckDefAndScriptFailure(lines, 'E488')
+
+  lines =<< trim END
+      var Func = (nr: int) => {
+              echo nr
+            }
+  END
+  CheckDefAndScriptFailure(lines, 'E1010', 1)
+
+  lines =<< trim END
+      var Func = (nr: number): int => {
+              return nr
+            }
+  END
+  CheckDefAndScriptFailure(lines, 'E1010', 1)
+
+  lines =<< trim END
+      var Func = (nr: number): int => {
+              return nr
+  END
+  CheckDefAndScriptFailure(lines, 'E1171', 1)  # line nr is function start
+
+  lines =<< trim END
+      vim9script
+      var Func = (nr: number): int => {
+          var ll =<< ENDIT
+             nothing
+  END
+  CheckScriptFailure(lines, 'E1145: Missing heredoc end marker: ENDIT', 2)
 enddef
 
 def NewLambdaWithComments(): func
@@ -2110,12 +2193,37 @@ def Test_expr7_dict()
       var cd = { # comment
                 key: 'val' # comment
                }
+
+      # different types used for the key
+      var dkeys = {['key']: 'string',
+                   [12]: 'numberexpr',
+                   34: 'number',
+                   [true]: 'bool'} 
+      assert_equal('string', dkeys['key'])
+      assert_equal('numberexpr', dkeys[12])
+      assert_equal('number', dkeys[34])
+      assert_equal('bool', dkeys[true])
+      if has('float')
+        dkeys = {[1.2]: 'floatexpr', [3.4]: 'float'}
+        assert_equal('floatexpr', dkeys[1.2])
+        assert_equal('float', dkeys[3.4])
+      endif
+
+      # automatic conversion from number to string
+      var n = 123
+      var dictnr = {[n]: 1}
+
+      # comment to start fold is OK
+      var x1: number #{{ fold
+      var x2 = 9 #{{ fold
   END
   CheckDefAndScriptSuccess(lines)
  
   # legacy syntax doesn't work
-  CheckDefFailure(["var x = #{key: 8}"], 'E1097:', 3)
-  CheckDefFailure(["var x = 'a' .. #{a: 1}"], 'E1097:', 3)
+  CheckDefAndScriptFailure(["var x = #{key: 8}"], 'E1170:', 1)
+  CheckDefAndScriptFailure(["var x = 'a' #{a: 1}"], 'E1170:', 1)
+  CheckDefAndScriptFailure(["var x = 'a' .. #{a: 1}"], 'E1170:', 1)
+  CheckDefAndScriptFailure(["var x = true ? #{a: 1}"], 'E1170:', 1)
 
   CheckDefFailure(["var x = {a:8}"], 'E1069:', 1)
   CheckDefFailure(["var x = {a : 8}"], 'E1068:', 1)
@@ -2136,16 +2244,11 @@ def Test_expr7_dict()
   CheckDefExecFailure(['var x: dict<string> = {a: 234, b: "1"}'], 'E1012:', 1)
   CheckDefExecFailure(['var x: dict<string> = {a: "x", b: 134}'], 'E1012:', 1)
 
+  # invalid types for the key
+  CheckDefFailure(["var x = {[[1, 2]]: 0}"], 'E1105:', 1)
+
   CheckDefFailure(['var x = ({'], 'E723:', 2)
   CheckDefExecFailure(['{}[getftype("file")]'], 'E716: Key not present in Dictionary: ""', 1)
-
-  # no automatic conversion from number to string
-  lines =<< trim END
-      var n = 123
-      var d = {[n]: 1}
-  END
-  CheckDefFailure(lines, 'E1012:', 2)
-  CheckScriptFailure(['vim9script'] + lines, 'E928:', 3)
 enddef
 
 def Test_expr7_dict_vim9script()
@@ -2326,6 +2429,35 @@ def Test_expr7_any_index_slice()
     assert_equal('abcdef', g:teststring[-9 :])
     assert_equal('abcd', g:teststring[: -3])
     assert_equal('', g:teststring[: -9])
+
+    # composing characters are included
+    g:teststring = 'àéû'
+    assert_equal('à', g:teststring[0])
+    assert_equal('é', g:teststring[1])
+    assert_equal('û', g:teststring[2])
+    assert_equal('', g:teststring[3])
+    assert_equal('', g:teststring[4])
+
+    assert_equal('û', g:teststring[-1])
+    assert_equal('é', g:teststring[-2])
+    assert_equal('à', g:teststring[-3])
+    assert_equal('', g:teststring[-4])
+    assert_equal('', g:teststring[-5])
+
+    assert_equal('à', g:teststring[0 : 0])
+    assert_equal('é', g:teststring[1 : 1])
+    assert_equal('àé', g:teststring[0 : 1])
+    assert_equal('àéû', g:teststring[0 : -1])
+    assert_equal('àé', g:teststring[0 : -2])
+    assert_equal('à', g:teststring[0 : -3])
+    assert_equal('', g:teststring[0 : -4])
+    assert_equal('', g:teststring[0 : -5])
+    assert_equal('àéû', g:teststring[ : ])
+    assert_equal('àéû', g:teststring[0 : ])
+    assert_equal('éû', g:teststring[1 : ])
+    assert_equal('û', g:teststring[2 : ])
+    assert_equal('', g:teststring[3 : ])
+    assert_equal('', g:teststring[4 : ])
 
     # blob index cannot be out of range
     g:testblob = 0z01ab
@@ -2519,6 +2651,12 @@ def Test_expr7_namespace()
   assert_equal('some', get(t:, 'some_var', 'xxx'))
   assert_equal('xxx', get(t:, 'no_var', 'xxx'))
   unlet t:some_var
+
+  # check using g: in a for loop more than DO_NOT_FREE_CNT times
+  for i in range(100000)
+    if has_key(g:, 'does-not-exist')
+    endif
+  endfor
 enddef
 
 def Test_expr7_parens()
@@ -2811,7 +2949,7 @@ def Test_expr7_trailing()
 
   # lambda method call
   l = [2, 5]
-  l->((l) => add(l, 8))()
+  l->((ll) => add(ll, 8))()
   assert_equal([2, 5, 8], l)
 
   # dict member
@@ -3002,8 +3140,8 @@ def Test_expr7_subscript_linebreak()
 enddef
 
 func Test_expr7_trailing_fails()
-  call CheckDefFailure(['var l = [2]', 'l->((l) => add(l, 8))'], 'E107:', 2)
-  call CheckDefFailure(['var l = [2]', 'l->((l) => add(l, 8)) ()'], 'E274:', 2)
+  call CheckDefFailure(['var l = [2]', 'l->((ll) => add(ll, 8))'], 'E107:', 2)
+  call CheckDefFailure(['var l = [2]', 'l->((ll) => add(ll, 8)) ()'], 'E274:', 2)
 endfunc
 
 func Test_expr_fails()

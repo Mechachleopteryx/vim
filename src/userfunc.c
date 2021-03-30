@@ -35,6 +35,8 @@ static char *e_funcref = N_("E718: Funcref required");
 static char *e_nofunc = N_("E130: Unknown function: %s");
 
 static void funccal_unref(funccall_T *fc, ufunc_T *fp, int force);
+static void func_clear(ufunc_T *fp, int force);
+static int func_free(ufunc_T *fp, int force);
 
     void
 func_init()
@@ -55,6 +57,7 @@ func_tbl_get(void)
  * Get one function argument.
  * If "argtypes" is not NULL also get the type: "arg: type".
  * If "types_optional" is TRUE a missing type is OK, use "any".
+ * If "evalarg" is not NULL use it to check for an already declared name.
  * Return a pointer to after the type.
  * When something is wrong return "arg".
  */
@@ -64,6 +67,7 @@ one_function_arg(
 	garray_T    *newargs,
 	garray_T    *argtypes,
 	int	    types_optional,
+	evalarg_T   *evalarg,
 	int	    skip)
 {
     char_u	*p = arg;
@@ -80,6 +84,13 @@ one_function_arg(
 	    semsg(_("E125: Illegal argument: %s"), arg);
 	return arg;
     }
+
+    // Vim9 script: cannot use script var name for argument. In function: also
+    // check local vars and arguments.
+    if (!skip && argtypes != NULL && check_defined(arg, p - arg,
+		    evalarg == NULL ? NULL : evalarg->eval_cctx, TRUE) == FAIL)
+	return arg;
+
     if (newargs != NULL && ga_grow(newargs, 1) == FAIL)
 	return arg;
     if (newargs != NULL)
@@ -126,7 +137,7 @@ one_function_arg(
 	    ++p;
 	    if (!skip && !VIM_ISWHITE(*p))
 	    {
-		semsg(_(e_white_space_required_after_str), ":");
+		semsg(_(e_white_space_required_after_str_str), ":", p - 1);
 		return arg;
 	    }
 	    type = skipwhite(p);
@@ -164,6 +175,7 @@ get_function_args(
     garray_T	*newargs,
     garray_T	*argtypes,	// NULL unless using :def
     int		types_optional,	// types optional if "argtypes" is not NULL
+    evalarg_T	*evalarg,	// context or NULL
     int		*varargs,
     garray_T	*default_args,
     int		skip,
@@ -238,15 +250,21 @@ get_function_args(
 
 		arg = p;
 		p = one_function_arg(p, newargs, argtypes, types_optional,
-									 skip);
+								evalarg, skip);
 		if (p == arg)
 		    break;
+		if (*skipwhite(p) == '=')
+		{
+		    emsg(_(e_cannot_use_default_for_variable_arguments));
+		    break;
+		}
 	    }
 	}
 	else
 	{
 	    arg = p;
-	    p = one_function_arg(p, newargs, argtypes, types_optional, skip);
+	    p = one_function_arg(p, newargs, argtypes, types_optional,
+								evalarg, skip);
 	    if (p == arg)
 		break;
 
@@ -294,10 +312,11 @@ get_function_args(
 		++p;
 		// Don't give this error when skipping, it makes the "->" not
 		// found in "{k,v -> x}" and give a confusing error.
-		if (!skip && in_vim9script()
+		// Allow missing space after comma in legacy functions.
+		if (!skip && argtypes != NULL
 				      && !IS_WHITE_OR_NUL(*p) && *p != endchar)
 		{
-		    semsg(_(e_white_space_required_after_str), ",");
+		    semsg(_(e_white_space_required_after_str_str), ",", p - 1);
 		    goto err_ret;
 		}
 	    }
@@ -380,6 +399,25 @@ parse_argument_types(ufunc_T *fp, garray_T *argtypes, int varargs)
     return OK;
 }
 
+    static int
+parse_return_type(ufunc_T *fp, char_u *ret_type)
+{
+    if (ret_type == NULL)
+	fp->uf_ret_type = &t_void;
+    else
+    {
+	char_u *p = ret_type;
+
+	fp->uf_ret_type = parse_type(&p, &fp->uf_type_list, TRUE);
+	if (fp->uf_ret_type == NULL)
+	{
+	    fp->uf_ret_type = &t_void;
+	    return FAIL;
+	}
+    }
+    return OK;
+}
+
 /*
  * Register function "fp" as using "current_funccal" as its scope.
  */
@@ -403,7 +441,9 @@ register_closure(ufunc_T *fp)
     static void
 set_ufunc_name(ufunc_T *fp, char_u *name)
 {
-    STRCPY(fp->uf_name, name);
+    // Add a type cast to avoid a warning for an overflow, the uf_name[] array
+    // actually extends beyond the struct.
+    STRCPY((void *)fp->uf_name, name);
 
     if (name[0] == K_SPECIAL)
     {
@@ -485,12 +525,17 @@ skip_arrow(
 	    if (white_error != NULL && !VIM_ISWHITE(s[1]))
 	    {
 		*white_error = TRUE;
-		semsg(_(e_white_space_required_after_str), ":");
+		semsg(_(e_white_space_required_after_str_str), ":", s);
 		return NULL;
 	    }
 	    s = skipwhite(s + 1);
 	    *ret_type = s;
 	    s = skip_type(s, TRUE);
+	    if (s == *ret_type)
+	    {
+		emsg(_(e_missing_return_type));
+		return NULL;
+	    }
 	}
 	bef = s;
 	s = skipwhite(s);
@@ -512,7 +557,513 @@ skip_arrow(
 }
 
 /*
- * Parse a lambda expression and get a Funcref from "*arg".
+ * Check if "*cmd" points to a function command and if so advance "*cmd" and
+ * return TRUE.
+ * Otherwise return FALSE;
+ * Do not consider "function(" to be a command.
+ */
+    static int
+is_function_cmd(char_u **cmd)
+{
+    char_u *p = *cmd;
+
+    if (checkforcmd(&p, "function", 2))
+    {
+	if (*p == '(')
+	    return FALSE;
+	*cmd = p;
+	return TRUE;
+    }
+    return FALSE;
+}
+
+/*
+ * Read the body of a function, put every line in "newlines".
+ * "newlines" must already have been initialized.
+ * "eap->cmdidx" is CMD_function, CMD_def or CMD_block;
+ */
+    static int
+get_function_body(
+	exarg_T	    *eap,
+	garray_T    *newlines,
+	char_u	    *line_arg_in,
+	char_u	    **line_to_free)
+{
+    linenr_T	sourcing_lnum_top = SOURCING_LNUM;
+    linenr_T	sourcing_lnum_off;
+    int		saved_wait_return = need_wait_return;
+    char_u	*line_arg = line_arg_in;
+    int		vim9_function = eap->cmdidx == CMD_def
+						   || eap->cmdidx == CMD_block;
+#define MAX_FUNC_NESTING 50
+    char	nesting_def[MAX_FUNC_NESTING];
+    int		nesting = 0;
+    getline_opt_T getline_options;
+    int		indent = 2;
+    char_u	*skip_until = NULL;
+    int		ret = FAIL;
+    int		is_heredoc = FALSE;
+    char_u	*heredoc_trimmed = NULL;
+
+    // Detect having skipped over comment lines to find the return
+    // type.  Add NULL lines to keep the line count correct.
+    sourcing_lnum_off = get_sourced_lnum(eap->getline, eap->cookie);
+    if (SOURCING_LNUM < sourcing_lnum_off)
+    {
+	sourcing_lnum_off -= SOURCING_LNUM;
+	if (ga_grow(newlines, sourcing_lnum_off) == FAIL)
+	    goto theend;
+	while (sourcing_lnum_off-- > 0)
+	    ((char_u **)(newlines->ga_data))[newlines->ga_len++] = NULL;
+    }
+
+    nesting_def[nesting] = vim9_function;
+    getline_options = vim9_function
+				? GETLINE_CONCAT_CONTBAR : GETLINE_CONCAT_CONT;
+    for (;;)
+    {
+	char_u	*theline;
+	char_u	*p;
+	char_u	*arg;
+
+	if (KeyTyped)
+	{
+	    msg_scroll = TRUE;
+	    saved_wait_return = FALSE;
+	}
+	need_wait_return = FALSE;
+
+	if (line_arg != NULL)
+	{
+	    // Use eap->arg, split up in parts by line breaks.
+	    theline = line_arg;
+	    p = vim_strchr(theline, '\n');
+	    if (p == NULL)
+		line_arg += STRLEN(line_arg);
+	    else
+	    {
+		*p = NUL;
+		line_arg = p + 1;
+	    }
+	}
+	else
+	{
+	    vim_free(*line_to_free);
+	    if (eap->getline == NULL)
+		theline = getcmdline(':', 0L, indent, getline_options);
+	    else
+		theline = eap->getline(':', eap->cookie, indent,
+							      getline_options);
+	    *line_to_free = theline;
+	}
+	if (KeyTyped)
+	    lines_left = Rows - 1;
+	if (theline == NULL)
+	{
+	    // Use the start of the function for the line number.
+	    SOURCING_LNUM = sourcing_lnum_top;
+	    if (skip_until != NULL)
+		semsg(_(e_missing_heredoc_end_marker_str), skip_until);
+	    else if (eap->cmdidx == CMD_def)
+		emsg(_(e_missing_enddef));
+	    else if (eap->cmdidx == CMD_block)
+		emsg(_(e_missing_end_block));
+	    else
+		emsg(_("E126: Missing :endfunction"));
+	    goto theend;
+	}
+
+	// Detect line continuation: SOURCING_LNUM increased more than one.
+	sourcing_lnum_off = get_sourced_lnum(eap->getline, eap->cookie);
+	if (SOURCING_LNUM < sourcing_lnum_off)
+	    sourcing_lnum_off -= SOURCING_LNUM;
+	else
+	    sourcing_lnum_off = 0;
+
+	if (skip_until != NULL)
+	{
+	    // Don't check for ":endfunc"/":enddef" between
+	    // * ":append" and "."
+	    // * ":python <<EOF" and "EOF"
+	    // * ":let {var-name} =<< [trim] {marker}" and "{marker}"
+	    if (heredoc_trimmed == NULL
+		    || (is_heredoc && skipwhite(theline) == theline)
+		    || STRNCMP(theline, heredoc_trimmed,
+						 STRLEN(heredoc_trimmed)) == 0)
+	    {
+		if (heredoc_trimmed == NULL)
+		    p = theline;
+		else if (is_heredoc)
+		    p = skipwhite(theline) == theline
+				 ? theline : theline + STRLEN(heredoc_trimmed);
+		else
+		    p = theline + STRLEN(heredoc_trimmed);
+		if (STRCMP(p, skip_until) == 0)
+		{
+		    VIM_CLEAR(skip_until);
+		    VIM_CLEAR(heredoc_trimmed);
+		    getline_options = vim9_function
+				? GETLINE_CONCAT_CONTBAR : GETLINE_CONCAT_CONT;
+		    is_heredoc = FALSE;
+		}
+	    }
+	}
+	else
+	{
+	    int c;
+
+	    // skip ':' and blanks
+	    for (p = theline; VIM_ISWHITE(*p) || *p == ':'; ++p)
+		;
+
+	    // Check for "endfunction", "enddef" or "}".
+	    // When a ":" follows it must be a dict key; "enddef: value,"
+	    if ((nesting == 0 && eap->cmdidx == CMD_block)
+		    ? *p == '}'
+		    : (checkforcmd(&p, nesting_def[nesting]
+						? "enddef" : "endfunction", 4)
+			&& *p != ':'))
+	    {
+		if (nesting-- == 0)
+		{
+		    char_u *nextcmd = NULL;
+
+		    if (*p == '|' || *p == '}')
+			nextcmd = p + 1;
+		    else if (line_arg != NULL && *skipwhite(line_arg) != NUL)
+			nextcmd = line_arg;
+		    else if (*p != NUL && *p != (vim9_function ? '#' : '"')
+					   && (vim9_function || p_verbose > 0))
+		    {
+			if (eap->cmdidx == CMD_def)
+			    semsg(_(e_text_found_after_enddef_str), p);
+			else
+			    give_warning2((char_u *)
+				   _("W22: Text found after :endfunction: %s"),
+				   p, TRUE);
+		    }
+		    if (nextcmd != NULL && *skipwhite(nextcmd) != NUL)
+		    {
+			// Another command follows. If the line came from "eap"
+			// we can simply point into it, otherwise we need to
+			// change "eap->cmdlinep".
+			eap->nextcmd = nextcmd;
+			if (*line_to_free != NULL)
+			{
+			    vim_free(*eap->cmdlinep);
+			    *eap->cmdlinep = *line_to_free;
+			    *line_to_free = NULL;
+			}
+		    }
+		    break;
+		}
+	    }
+
+	    // Check for mismatched "endfunc" or "enddef".
+	    // We don't check for "def" inside "func" thus we also can't check
+	    // for "enddef".
+	    // We continue to find the end of the function, although we might
+	    // not find it.
+	    else if (nesting_def[nesting])
+	    {
+		if (checkforcmd(&p, "endfunction", 4) && *p != ':')
+		    emsg(_(e_mismatched_endfunction));
+	    }
+	    else if (eap->cmdidx == CMD_def && checkforcmd(&p, "enddef", 4))
+		emsg(_(e_mismatched_enddef));
+
+	    // Increase indent inside "if", "while", "for" and "try", decrease
+	    // at "end".
+	    if (indent > 2 && (*p == '}' || STRNCMP(p, "end", 3) == 0))
+		indent -= 2;
+	    else if (STRNCMP(p, "if", 2) == 0
+		    || STRNCMP(p, "wh", 2) == 0
+		    || STRNCMP(p, "for", 3) == 0
+		    || STRNCMP(p, "try", 3) == 0)
+		indent += 2;
+
+	    // Check for defining a function inside this function.
+	    // Only recognize "def" inside "def", not inside "function",
+	    // For backwards compatibility, see Test_function_python().
+	    c = *p;
+	    if (is_function_cmd(&p)
+		    || (eap->cmdidx == CMD_def && checkforcmd(&p, "def", 3)))
+	    {
+		if (*p == '!')
+		    p = skipwhite(p + 1);
+		p += eval_fname_script(p);
+		vim_free(trans_function_name(&p, NULL, TRUE, 0, NULL,
+								  NULL, NULL));
+		if (*skipwhite(p) == '(')
+		{
+		    if (nesting == MAX_FUNC_NESTING - 1)
+			emsg(_(e_function_nesting_too_deep));
+		    else
+		    {
+			++nesting;
+			nesting_def[nesting] = (c == 'd');
+			indent += 2;
+		    }
+		}
+	    }
+
+	    // Check for ":append", ":change", ":insert".  Not for :def.
+	    p = skip_range(p, FALSE, NULL);
+	    if (!vim9_function
+		&& ((p[0] == 'a' && (!ASCII_ISALPHA(p[1]) || p[1] == 'p'))
+		    || (p[0] == 'c'
+			&& (!ASCII_ISALPHA(p[1]) || (p[1] == 'h'
+				&& (!ASCII_ISALPHA(p[2]) || (p[2] == 'a'
+					&& (STRNCMP(&p[3], "nge", 3) != 0
+					    || !ASCII_ISALPHA(p[6])))))))
+		    || (p[0] == 'i'
+			&& (!ASCII_ISALPHA(p[1]) || (p[1] == 'n'
+				&& (!ASCII_ISALPHA(p[2])
+				    || (p[2] == 's'
+					&& (!ASCII_ISALPHA(p[3])
+						|| p[3] == 'e'))))))))
+		skip_until = vim_strsave((char_u *)".");
+
+	    // Check for ":python <<EOF", ":tcl <<EOF", etc.
+	    arg = skipwhite(skiptowhite(p));
+	    if (arg[0] == '<' && arg[1] =='<'
+		    && ((p[0] == 'p' && p[1] == 'y'
+				    && (!ASCII_ISALNUM(p[2]) || p[2] == 't'
+					|| ((p[2] == '3' || p[2] == 'x')
+						   && !ASCII_ISALPHA(p[3]))))
+			|| (p[0] == 'p' && p[1] == 'e'
+				    && (!ASCII_ISALPHA(p[2]) || p[2] == 'r'))
+			|| (p[0] == 't' && p[1] == 'c'
+				    && (!ASCII_ISALPHA(p[2]) || p[2] == 'l'))
+			|| (p[0] == 'l' && p[1] == 'u' && p[2] == 'a'
+				    && !ASCII_ISALPHA(p[3]))
+			|| (p[0] == 'r' && p[1] == 'u' && p[2] == 'b'
+				    && (!ASCII_ISALPHA(p[3]) || p[3] == 'y'))
+			|| (p[0] == 'm' && p[1] == 'z'
+				    && (!ASCII_ISALPHA(p[2]) || p[2] == 's'))
+			))
+	    {
+		// ":python <<" continues until a dot, like ":append"
+		p = skipwhite(arg + 2);
+		if (STRNCMP(p, "trim", 4) == 0)
+		{
+		    // Ignore leading white space.
+		    p = skipwhite(p + 4);
+		    heredoc_trimmed = vim_strnsave(theline,
+						 skipwhite(theline) - theline);
+		}
+		if (*p == NUL)
+		    skip_until = vim_strsave((char_u *)".");
+		else
+		    skip_until = vim_strnsave(p, skiptowhite(p) - p);
+		getline_options = GETLINE_NONE;
+		is_heredoc = TRUE;
+	    }
+
+	    // Check for ":cmd v =<< [trim] EOF"
+	    //       and ":cmd [a, b] =<< [trim] EOF"
+	    //       and "lines =<< [trim] EOF" for Vim9
+	    // Where "cmd" can be "let", "var", "final" or "const".
+	    arg = skipwhite(skiptowhite(p));
+	    if (*arg == '[')
+		arg = vim_strchr(arg, ']');
+	    if (arg != NULL)
+	    {
+		int found = (eap->cmdidx == CMD_def && arg[0] == '='
+					     && arg[1] == '<' && arg[2] =='<');
+
+		if (!found)
+		    // skip over the argument after "cmd"
+		    arg = skipwhite(skiptowhite(arg));
+		if (found || (arg[0] == '=' && arg[1] == '<' && arg[2] =='<'
+			&& (checkforcmd(&p, "let", 2)
+			    || checkforcmd(&p, "var", 3)
+			    || checkforcmd(&p, "final", 5)
+			    || checkforcmd(&p, "const", 5))))
+		{
+		    p = skipwhite(arg + 3);
+		    if (STRNCMP(p, "trim", 4) == 0)
+		    {
+			// Ignore leading white space.
+			p = skipwhite(p + 4);
+			heredoc_trimmed = vim_strnsave(theline,
+						 skipwhite(theline) - theline);
+		    }
+		    skip_until = vim_strnsave(p, skiptowhite(p) - p);
+		    getline_options = GETLINE_NONE;
+		    is_heredoc = TRUE;
+		}
+	    }
+	}
+
+	// Add the line to the function.
+	if (ga_grow(newlines, 1 + sourcing_lnum_off) == FAIL)
+	    goto theend;
+
+	// Copy the line to newly allocated memory.  get_one_sourceline()
+	// allocates 250 bytes per line, this saves 80% on average.  The cost
+	// is an extra alloc/free.
+	p = vim_strsave(theline);
+	if (p == NULL)
+	    goto theend;
+	((char_u **)(newlines->ga_data))[newlines->ga_len++] = p;
+
+	// Add NULL lines for continuation lines, so that the line count is
+	// equal to the index in the growarray.
+	while (sourcing_lnum_off-- > 0)
+	    ((char_u **)(newlines->ga_data))[newlines->ga_len++] = NULL;
+
+	// Check for end of eap->arg.
+	if (line_arg != NULL && *line_arg == NUL)
+	    line_arg = NULL;
+    }
+
+    // Don't define the function when skipping commands or when an error was
+    // detected.
+    if (!eap->skip && !did_emsg)
+	ret = OK;
+
+theend:
+    vim_free(skip_until);
+    vim_free(heredoc_trimmed);
+    need_wait_return |= saved_wait_return;
+    return ret;
+}
+
+/*
+ * Handle the body of a lambda.  *arg points to the "{", process statements
+ * until the matching "}".
+ * When successful "rettv" is set to a funcref.
+ */
+    static int
+lambda_function_body(
+	char_u	    **arg,
+	typval_T    *rettv,
+	evalarg_T   *evalarg,
+	garray_T    *newargs,
+	garray_T    *argtypes,
+	int	    varargs,
+	garray_T    *default_args,
+	char_u	    *ret_type)
+{
+    int		evaluate = evalarg != NULL
+				      && (evalarg->eval_flags & EVAL_EVALUATE);
+    ufunc_T	*ufunc = NULL;
+    exarg_T	eap;
+    garray_T	newlines;
+    char_u	*cmdline = NULL;
+    int		ret = FAIL;
+    char_u	*line_to_free = NULL;
+    partial_T	*pt;
+    char_u	*name;
+    int		lnum_save = -1;
+    linenr_T	sourcing_lnum_top = SOURCING_LNUM;
+
+    if (!ends_excmd2(*arg, skipwhite(*arg + 1)))
+    {
+	semsg(_(e_trailing_arg), *arg + 1);
+	return FAIL;
+    }
+
+    CLEAR_FIELD(eap);
+    eap.cmdidx = CMD_block;
+    eap.forceit = FALSE;
+    eap.cmdlinep = &cmdline;
+    eap.skip = !evaluate;
+    if (evalarg->eval_cctx != NULL)
+	fill_exarg_from_cctx(&eap, evalarg->eval_cctx);
+    else
+    {
+	eap.getline = evalarg->eval_getline;
+	eap.cookie = evalarg->eval_cookie;
+    }
+
+    ga_init2(&newlines, (int)sizeof(char_u *), 10);
+    if (get_function_body(&eap, &newlines, NULL, &line_to_free) == FAIL)
+    {
+	vim_free(cmdline);
+	goto erret;
+    }
+    if (cmdline != NULL)
+    {
+	// Something comes after the "}".
+	*arg = eap.nextcmd;
+
+	// "arg" points into cmdline, need to keep the line and free it later.
+	vim_free(evalarg->eval_tofree_cmdline);
+	evalarg->eval_tofree_cmdline = cmdline;
+    }
+    else
+	*arg = (char_u *)"";
+
+    name = get_lambda_name();
+    ufunc = alloc_clear(offsetof(ufunc_T, uf_name) + STRLEN(name) + 1);
+    if (ufunc == NULL)
+	goto erret;
+    set_ufunc_name(ufunc, name);
+    if (hash_add(&func_hashtab, UF2HIKEY(ufunc)) == FAIL)
+	goto erret;
+    ufunc->uf_refcount = 1;
+    ufunc->uf_args = *newargs;
+    newargs->ga_data = NULL;
+    ufunc->uf_def_args = *default_args;
+    default_args->ga_data = NULL;
+    ufunc->uf_func_type = &t_func_any;
+
+    // error messages are for the first function line
+    lnum_save = SOURCING_LNUM;
+    SOURCING_LNUM = sourcing_lnum_top;
+
+    // parse argument types
+    if (parse_argument_types(ufunc, argtypes, varargs) == FAIL)
+    {
+	SOURCING_LNUM = lnum_save;
+	goto erret;
+    }
+
+    // parse the return type, if any
+    if (parse_return_type(ufunc, ret_type) == FAIL)
+	goto erret;
+
+    pt = ALLOC_CLEAR_ONE(partial_T);
+    if (pt == NULL)
+	goto erret;
+    pt->pt_func = ufunc;
+    pt->pt_refcount = 1;
+
+    ufunc->uf_lines = newlines;
+    newlines.ga_data = NULL;
+    if (sandbox)
+	ufunc->uf_flags |= FC_SANDBOX;
+    if (!ASCII_ISUPPER(*ufunc->uf_name))
+	ufunc->uf_flags |= FC_VIM9;
+    ufunc->uf_script_ctx = current_sctx;
+    ufunc->uf_script_ctx_version = current_sctx.sc_version;
+    ufunc->uf_script_ctx.sc_lnum += sourcing_lnum_top;
+    set_function_type(ufunc);
+
+    rettv->vval.v_partial = pt;
+    rettv->v_type = VAR_PARTIAL;
+    ufunc = NULL;
+    ret = OK;
+
+erret:
+    if (lnum_save >= 0)
+	SOURCING_LNUM = lnum_save;
+    vim_free(line_to_free);
+    ga_clear_strings(&newlines);
+    ga_clear_strings(newargs);
+    ga_clear_strings(default_args);
+    if (ufunc != NULL)
+    {
+	func_clear(ufunc, TRUE);
+	func_free(ufunc, TRUE);
+    }
+    return ret;
+}
+
+/*
+ * Parse a lambda expression and get a Funcref from "*arg" into "rettv".
  * "arg" points to the { in "{arg -> expr}" or the ( in "(arg) => expr"
  * When "types_optional" is TRUE optionally take argument types.
  * Return OK or FAIL.  Returns NOTDONE for dict or {expr}.
@@ -530,6 +1081,7 @@ get_lambda_tv(
     garray_T	newlines;
     garray_T	*pnewargs;
     garray_T	argtypes;
+    garray_T	default_args;
     ufunc_T	*fp = NULL;
     partial_T   *pt = NULL;
     int		varargs;
@@ -539,9 +1091,11 @@ get_lambda_tv(
     char_u	*start, *end;
     int		*old_eval_lavars = eval_lavars_used;
     int		eval_lavars = FALSE;
-    char_u	*tofree = NULL;
+    char_u	*tofree1 = NULL;
+    char_u	*tofree2 = NULL;
     int		equal_arrow = **arg == '(';
     int		white_error = FALSE;
+    int		called_emsg_start = called_emsg;
 
     if (equal_arrow && !in_vim9script())
 	return NOTDONE;
@@ -553,13 +1107,13 @@ get_lambda_tv(
     // be found after the arguments.
     s = *arg + 1;
     ret = get_function_args(&s, equal_arrow ? ')' : '-', NULL,
-	    types_optional ? &argtypes : NULL, types_optional,
+	    types_optional ? &argtypes : NULL, types_optional, evalarg,
 						 NULL, NULL, TRUE, NULL, NULL);
     if (ret == FAIL || skip_arrow(s, equal_arrow, &ret_type, NULL) == NULL)
     {
 	if (types_optional)
 	    ga_clear_strings(&argtypes);
-	return NOTDONE;
+	return called_emsg == called_emsg_start ? NOTDONE : FAIL;
     }
 
     // Parse the arguments for real.
@@ -569,8 +1123,9 @@ get_lambda_tv(
 	pnewargs = NULL;
     *arg += 1;
     ret = get_function_args(arg, equal_arrow ? ')' : '-', pnewargs,
-	    types_optional ? &argtypes : NULL, types_optional,
-					    &varargs, NULL, FALSE, NULL, NULL);
+	    types_optional ? &argtypes : NULL, types_optional, evalarg,
+					    &varargs, &default_args,
+					    FALSE, NULL, NULL);
     if (ret == FAIL
 		  || (s = skip_arrow(*arg, equal_arrow, &ret_type,
 		equal_arrow || in_vim9script() ? &white_error : NULL)) == NULL)
@@ -582,6 +1137,13 @@ get_lambda_tv(
     }
     *arg = s;
 
+    // Skipping over linebreaks may make "ret_type" invalid, make a copy.
+    if (ret_type != NULL)
+    {
+	ret_type = vim_strsave(ret_type);
+	tofree2 = ret_type;
+    }
+
     // Set up a flag for checking local variables and arguments.
     if (evaluate)
 	eval_lavars_used = &eval_lavars;
@@ -591,9 +1153,15 @@ get_lambda_tv(
     // Recognize "{" as the start of a function body.
     if (equal_arrow && **arg == '{')
     {
-	// TODO: process the function body upto the "}".
-	// Return type is required then.
-	emsg("Lambda function body not supported yet");
+	if (lambda_function_body(arg, rettv, evalarg, pnewargs,
+			   types_optional ? &argtypes : NULL, varargs,
+			   &default_args, ret_type) == FAIL)
+	    goto errret;
+	goto theend;
+    }
+    if (default_args.ga_len > 0)
+    {
+	emsg(_(e_cannot_use_default_values_in_lambda));
 	goto errret;
     }
 
@@ -605,7 +1173,7 @@ get_lambda_tv(
     if (evalarg != NULL)
     {
 	// avoid that the expression gets freed when another line break follows
-	tofree = evalarg->eval_tofree;
+	tofree1 = evalarg->eval_tofree;
 	evalarg->eval_tofree = NULL;
     }
 
@@ -653,7 +1221,6 @@ get_lambda_tv(
 
 	fp->uf_refcount = 1;
 	set_ufunc_name(fp, name);
-	hash_add(&func_hashtab, UF2HIKEY(fp));
 	fp->uf_args = newargs;
 	ga_init(&fp->uf_def_args);
 	if (types_optional)
@@ -696,13 +1263,17 @@ get_lambda_tv(
 	pt->pt_refcount = 1;
 	rettv->vval.v_partial = pt;
 	rettv->v_type = VAR_PARTIAL;
+
+	hash_add(&func_hashtab, UF2HIKEY(fp));
     }
 
+theend:
     eval_lavars_used = old_eval_lavars;
     if (evalarg != NULL && evalarg->eval_tofree == NULL)
-	evalarg->eval_tofree = tofree;
+	evalarg->eval_tofree = tofree1;
     else
-	vim_free(tofree);
+	vim_free(tofree1);
+    vim_free(tofree2);
     if (types_optional)
 	ga_clear_strings(&argtypes);
     return OK;
@@ -710,14 +1281,16 @@ get_lambda_tv(
 errret:
     ga_clear_strings(&newargs);
     ga_clear_strings(&newlines);
+    ga_clear_strings(&default_args);
     if (types_optional)
 	ga_clear_strings(&argtypes);
     vim_free(fp);
     vim_free(pt);
     if (evalarg != NULL && evalarg->eval_tofree == NULL)
-	evalarg->eval_tofree = tofree;
+	evalarg->eval_tofree = tofree1;
     else
-	vim_free(tofree);
+	vim_free(tofree1);
+    vim_free(tofree2);
     eval_lavars_used = old_eval_lavars;
     return FAIL;
 }
@@ -855,7 +1428,7 @@ get_func_tv(
 	{
 	    if (*argp != ',' && *skipwhite(argp) == ',')
 	    {
-		semsg(_(e_no_white_space_allowed_before_str), ",");
+		semsg(_(e_no_white_space_allowed_before_str_str), ",", argp);
 		ret = FAIL;
 		break;
 	    }
@@ -866,7 +1439,7 @@ get_func_tv(
 	    break;
 	if (vim9script && !IS_WHITE_OR_NUL(argp[1]))
 	{
-	    semsg(_(e_white_space_required_after_str), ",");
+	    semsg(_(e_white_space_required_after_str_str), ",", argp);
 	    ret = FAIL;
 	    break;
 	}
@@ -1323,9 +1896,12 @@ func_remove(ufunc_T *fp)
 	// function, so we can find the index when defining the function again.
 	// Do remove it when it's a copy.
 	if (fp->uf_def_status == UF_COMPILED && (fp->uf_flags & FC_COPY) == 0)
+	{
 	    fp->uf_flags |= FC_DEAD;
-	else
-	    hash_remove(&func_hashtab, hi);
+	    return FALSE;
+	}
+	hash_remove(&func_hashtab, hi);
+	fp->uf_flags |= FC_DELETED;
 	return TRUE;
     }
     return FALSE;
@@ -1338,12 +1914,16 @@ func_clear_items(ufunc_T *fp)
     ga_clear_strings(&(fp->uf_def_args));
     ga_clear_strings(&(fp->uf_lines));
     VIM_CLEAR(fp->uf_arg_types);
-    VIM_CLEAR(fp->uf_def_arg_idx);
     VIM_CLEAR(fp->uf_block_ids);
     VIM_CLEAR(fp->uf_va_name);
     clear_type_list(&fp->uf_type_list);
+
+    // Increment the refcount of this function to avoid it being freed
+    // recursively when the partial is freed.
+    fp->uf_refcount += 3;
     partial_unref(fp->uf_partial);
     fp->uf_partial = NULL;
+    fp->uf_refcount -= 3;
 
 #ifdef FEAT_LUA
     if (fp->uf_cb_free != NULL)
@@ -1436,10 +2016,10 @@ copy_func(char_u *lambda, char_u *global, ectx_T *ectx)
 	return FAIL;
     }
 
-    // TODO: handle ! to overwrite
     fp = find_func(global, TRUE, NULL);
     if (fp != NULL)
     {
+	// TODO: handle ! to overwrite
 	semsg(_(e_funcexts), global);
 	return FAIL;
     }
@@ -1468,14 +2048,6 @@ copy_func(char_u *lambda, char_u *global, ectx_T *ectx)
 	mch_memmove(fp->uf_arg_types, ufunc->uf_arg_types,
 				    sizeof(type_T *) * fp->uf_args.ga_len);
     }
-    if (ufunc->uf_def_arg_idx != NULL)
-    {
-	fp->uf_def_arg_idx = ALLOC_MULT(int, fp->uf_def_args.ga_len + 1);
-	if (fp->uf_def_arg_idx == NULL)
-	    goto failed;
-	mch_memmove(fp->uf_def_arg_idx, ufunc->uf_def_arg_idx,
-				 sizeof(int) * fp->uf_def_args.ga_len + 1);
-    }
     if (ufunc->uf_va_name != NULL)
     {
 	fp->uf_va_name = vim_strsave(ufunc->uf_va_name);
@@ -1491,8 +2063,9 @@ copy_func(char_u *lambda, char_u *global, ectx_T *ectx)
     // the referenced dfunc_T is now used one more time
     link_def_function(fp);
 
-    // Create a partial to store the context of the function, if not done
-    // already.
+    // Create a partial to store the context of the function where it was
+    // instantiated.  Only needs to be done once.  Do this on the original
+    // function, "dfunc->df_ufunc" will point to it.
     if ((ufunc->uf_flags & FC_CLOSURE) && ufunc->uf_partial == NULL)
     {
 	partial_T   *pt = ALLOC_CLEAR_ONE(partial_T);
@@ -1500,14 +2073,12 @@ copy_func(char_u *lambda, char_u *global, ectx_T *ectx)
 	if (pt == NULL)
 	    goto failed;
 	if (fill_partial_and_closure(pt, ufunc, ectx) == FAIL)
+	{
+            vim_free(pt);
 	    goto failed;
+	}
 	ufunc->uf_partial = pt;
-	--pt->pt_refcount;  // not referenced here yet
-    }
-    if (ufunc->uf_partial != NULL)
-    {
-	fp->uf_partial = ufunc->uf_partial;
-	++fp->uf_partial->pt_refcount;
+	--pt->pt_refcount;  // not actually referenced here
     }
 
     return OK;
@@ -1587,11 +2158,13 @@ call_user_func(
     char_u	numbuf[NUMBUFLEN];
     char_u	*name;
 #ifdef FEAT_PROFILE
-    proftime_T	wait_start;
-    proftime_T	call_start;
-    int		started_profiling = FALSE;
+    profinfo_T	profile_info;
 #endif
     ESTACK_CHECK_DECLARATION
+
+#ifdef FEAT_PROFILE
+    CLEAR_FIELD(profile_info);
+#endif
 
     // If depth of calling is getting too high, don't execute the function.
     if (funcdepth_increment() == FAIL)
@@ -1620,9 +2193,21 @@ call_user_func(
 
     if (fp->uf_def_status != UF_NOT_COMPILED)
     {
+#ifdef FEAT_PROFILE
+	ufunc_T *caller = fc->caller == NULL ? NULL : fc->caller->func;
+#endif
 	// Execute the function, possibly compiling it first.
+#ifdef FEAT_PROFILE
+	if (do_profiling == PROF_YES)
+	    profile_may_start_func(&profile_info, fp, caller);
+#endif
 	call_def_function(fp, argcount, argvars, funcexe->partial, rettv);
 	funcdepth_decrement();
+#ifdef FEAT_PROFILE
+	if (do_profiling == PROF_YES && (fp->uf_profiling
+				  || (caller != NULL && caller->uf_profiling)))
+	    profile_may_end_func(&profile_info, fp, caller);
+#endif
 	current_funccal = fc->caller;
 	free_funccal(fc);
 	return;
@@ -1836,21 +2421,8 @@ call_user_func(
     }
 #ifdef FEAT_PROFILE
     if (do_profiling == PROF_YES)
-    {
-	if (!fp->uf_profiling && has_profiling(FALSE, fp->uf_name, NULL))
-	{
-	    started_profiling = TRUE;
-	    func_do_profile(fp);
-	}
-	if (fp->uf_profiling
-		    || (fc->caller != NULL && fc->caller->func->uf_profiling))
-	{
-	    ++fp->uf_tm_count;
-	    profile_start(&call_start);
-	    profile_zero(&fp->uf_tm_children);
-	}
-	script_prof_save(&wait_start);
-    }
+	profile_may_start_func(&profile_info, fp,
+				 fc->caller == NULL ? NULL : fc->caller->func);
 #endif
 
     save_current_sctx = current_sctx;
@@ -1886,21 +2458,12 @@ call_user_func(
     }
 
 #ifdef FEAT_PROFILE
-    if (do_profiling == PROF_YES && (fp->uf_profiling
-		    || (fc->caller != NULL && fc->caller->func->uf_profiling)))
+    if (do_profiling == PROF_YES)
     {
-	profile_end(&call_start);
-	profile_sub_wait(&wait_start, &call_start);
-	profile_add(&fp->uf_tm_total, &call_start);
-	profile_self(&fp->uf_tm_self, &call_start, &fp->uf_tm_children);
-	if (fc->caller != NULL && fc->caller->func->uf_profiling)
-	{
-	    profile_add(&fc->caller->func->uf_tm_children, &call_start);
-	    profile_add(&fc->caller->func->uf_tml_children, &call_start);
-	}
-	if (started_profiling)
-	    // make a ":profdel func" stop profiling the function
-	    fp->uf_profiling = FALSE;
+	ufunc_T *caller = fc->caller == NULL ? NULL : fc->caller->func;
+
+	if (fp->uf_profiling || (caller != NULL && caller->uf_profiling))
+	    profile_may_end_func(&profile_info, fp, caller);
     }
 #endif
 
@@ -1950,7 +2513,7 @@ call_user_func(
     current_sctx = save_current_sctx;
 #ifdef FEAT_PROFILE
     if (do_profiling == PROF_YES)
-	script_prof_restore(&wait_start);
+	script_prof_restore(&profile_info.pi_wait_start);
 #endif
     if (using_sandbox)
 	--sandbox;
@@ -2102,11 +2665,23 @@ delete_script_functions(int sid)
 		    int changed = func_hashtab.ht_changed;
 
 		    fp->uf_flags |= FC_DEAD;
-		    func_clear(fp, TRUE);
-		    // When clearing a function another function can be cleared
-		    // as a side effect.  When that happens start over.
-		    if (changed != func_hashtab.ht_changed)
-			break;
+
+		    if (fp->uf_calls > 0)
+		    {
+			// Function is executing, don't free it but do remove
+			// it from the hashtable.
+			if (func_remove(fp))
+			    fp->uf_refcount--;
+		    }
+		    else
+		    {
+			func_clear(fp, TRUE);
+			// When clearing a function another function can be
+			// cleared as a side effect.  When that happens start
+			// over.
+			if (changed != func_hashtab.ht_changed)
+			    break;
+		    }
 		}
 		--todo;
 	    }
@@ -2412,7 +2987,7 @@ call_func(
     {
 	// Check that the argument types are OK for the types of the funcref.
 	if (check_argument_types(funcexe->check_type, argvars, argcount,
-								 name) == FAIL)
+				     (name != NULL) ? name : funcname) == FAIL)
 	    error = FCERR_OTHER;
     }
 
@@ -2959,27 +3534,6 @@ list_functions(regmatch_T *regmatch)
 }
 
 /*
- * Check if "*cmd" points to a function command and if so advance "*cmd" and
- * return TRUE.
- * Otherwise return FALSE;
- * Do not consider "function(" to be a command.
- */
-    static int
-is_function_cmd(char_u **cmd)
-{
-    char_u *p = *cmd;
-
-    if (checkforcmd(&p, "function", 2))
-    {
-	if (*p == '(')
-	    return FALSE;
-	*cmd = p;
-	return TRUE;
-    }
-    return FALSE;
-}
-
-/*
  * ":function" also supporting nested ":def".
  * When "name_arg" is not NULL this is a nested function, using "name_arg" for
  * the function name.
@@ -2988,12 +3542,10 @@ is_function_cmd(char_u **cmd)
     ufunc_T *
 define_function(exarg_T *eap, char_u *name_arg)
 {
-    char_u	*theline;
     char_u	*line_to_free = NULL;
     int		j;
     int		c;
     int		saved_did_emsg;
-    int		saved_wait_return = need_wait_return;
     char_u	*name = name_arg;
     int		is_global = FALSE;
     char_u	*p;
@@ -3009,21 +3561,12 @@ define_function(exarg_T *eap, char_u *name_arg)
     char_u	*ret_type = NULL;
     ufunc_T	*fp = NULL;
     int		overwrite = FALSE;
-    int		indent;
-    int		nesting;
-#define MAX_FUNC_NESTING 50
-    char	nesting_def[MAX_FUNC_NESTING];
     dictitem_T	*v;
     funcdict_T	fudi;
     static int	func_nr = 0;	    // number for nameless function
     int		paren;
     hashitem_T	*hi;
-    getline_opt_T getline_options;
-    linenr_T	sourcing_lnum_off;
     linenr_T	sourcing_lnum_top;
-    int		is_heredoc = FALSE;
-    char_u	*skip_until = NULL;
-    char_u	*heredoc_trimmed = NULL;
     int		vim9script = in_vim9script();
     imported_T	*import = NULL;
 
@@ -3203,6 +3746,12 @@ define_function(exarg_T *eap, char_u *name_arg)
 	    p = vim_strchr(p, '(');
     }
 
+    if ((vim9script || eap->cmdidx == CMD_def) && VIM_ISWHITE(p[-1]))
+    {
+	semsg(_(e_no_white_space_allowed_before_str_str), "(", p - 1);
+	goto ret_free;
+    }
+
     // In Vim9 script only global functions can be redefined.
     if (vim9script && eap->forceit && !is_global)
     {
@@ -3210,7 +3759,7 @@ define_function(exarg_T *eap, char_u *name_arg)
 	goto ret_free;
     }
 
-    ga_init2(&newlines, (int)sizeof(char_u *), 3);
+    ga_init2(&newlines, (int)sizeof(char_u *), 10);
 
     if (!eap->skip && name_arg == NULL)
     {
@@ -3244,7 +3793,7 @@ define_function(exarg_T *eap, char_u *name_arg)
     ++p;
     if (get_function_args(&p, ')', &newargs,
 			eap->cmdidx == CMD_def ? &argtypes : NULL, FALSE,
-			 &varargs, &default_args, eap->skip,
+			 NULL, &varargs, &default_args, eap->skip,
 			 eap, &line_to_free) == FAIL)
 	goto errret_2;
     whitep = p;
@@ -3346,309 +3895,7 @@ define_function(exarg_T *eap, char_u *name_arg)
     // Save the starting line number.
     sourcing_lnum_top = SOURCING_LNUM;
 
-    // Detect having skipped over comment lines to find the return
-    // type.  Add NULL lines to keep the line count correct.
-    sourcing_lnum_off = get_sourced_lnum(eap->getline, eap->cookie);
-    if (SOURCING_LNUM < sourcing_lnum_off)
-    {
-	sourcing_lnum_off -= SOURCING_LNUM;
-	if (ga_grow(&newlines, sourcing_lnum_off) == FAIL)
-	    goto erret;
-	while (sourcing_lnum_off-- > 0)
-	    ((char_u **)(newlines.ga_data))[newlines.ga_len++] = NULL;
-    }
-
-    indent = 2;
-    nesting = 0;
-    nesting_def[nesting] = (eap->cmdidx == CMD_def);
-    getline_options = eap->cmdidx == CMD_def
-				? GETLINE_CONCAT_CONTBAR : GETLINE_CONCAT_CONT;
-    for (;;)
-    {
-	if (KeyTyped)
-	{
-	    msg_scroll = TRUE;
-	    saved_wait_return = FALSE;
-	}
-	need_wait_return = FALSE;
-
-	if (line_arg != NULL)
-	{
-	    // Use eap->arg, split up in parts by line breaks.
-	    theline = line_arg;
-	    p = vim_strchr(theline, '\n');
-	    if (p == NULL)
-		line_arg += STRLEN(line_arg);
-	    else
-	    {
-		*p = NUL;
-		line_arg = p + 1;
-	    }
-	}
-	else
-	{
-	    vim_free(line_to_free);
-	    if (eap->getline == NULL)
-		theline = getcmdline(':', 0L, indent, getline_options);
-	    else
-		theline = eap->getline(':', eap->cookie, indent,
-							      getline_options);
-	    line_to_free = theline;
-	}
-	if (KeyTyped)
-	    lines_left = Rows - 1;
-	if (theline == NULL)
-	{
-	    // Use the start of the function for the line number.
-	    SOURCING_LNUM = sourcing_lnum_top;
-	    if (skip_until != NULL)
-		semsg(_(e_missing_heredoc_end_marker_str), skip_until);
-	    else if (eap->cmdidx == CMD_def)
-		emsg(_(e_missing_enddef));
-	    else
-		emsg(_("E126: Missing :endfunction"));
-	    goto erret;
-	}
-
-	// Detect line continuation: SOURCING_LNUM increased more than one.
-	sourcing_lnum_off = get_sourced_lnum(eap->getline, eap->cookie);
-	if (SOURCING_LNUM < sourcing_lnum_off)
-	    sourcing_lnum_off -= SOURCING_LNUM;
-	else
-	    sourcing_lnum_off = 0;
-
-	if (skip_until != NULL)
-	{
-	    // Don't check for ":endfunc"/":enddef" between
-	    // * ":append" and "."
-	    // * ":python <<EOF" and "EOF"
-	    // * ":let {var-name} =<< [trim] {marker}" and "{marker}"
-	    if (heredoc_trimmed == NULL
-		    || (is_heredoc && skipwhite(theline) == theline)
-		    || STRNCMP(theline, heredoc_trimmed,
-						 STRLEN(heredoc_trimmed)) == 0)
-	    {
-		if (heredoc_trimmed == NULL)
-		    p = theline;
-		else if (is_heredoc)
-		    p = skipwhite(theline) == theline
-				 ? theline : theline + STRLEN(heredoc_trimmed);
-		else
-		    p = theline + STRLEN(heredoc_trimmed);
-		if (STRCMP(p, skip_until) == 0)
-		{
-		    VIM_CLEAR(skip_until);
-		    VIM_CLEAR(heredoc_trimmed);
-		    getline_options = eap->cmdidx == CMD_def
-				? GETLINE_CONCAT_CONTBAR : GETLINE_CONCAT_CONT;
-		    is_heredoc = FALSE;
-		}
-	    }
-	}
-	else
-	{
-	    // skip ':' and blanks
-	    for (p = theline; VIM_ISWHITE(*p) || *p == ':'; ++p)
-		;
-
-	    // Check for "endfunction" or "enddef".
-	    // When a ":" follows it must be a dict key; "enddef: value,"
-	    if (checkforcmd(&p, nesting_def[nesting]
-						? "enddef" : "endfunction", 4)
-		    && *p != ':')
-	    {
-		if (nesting-- == 0)
-		{
-		    char_u *nextcmd = NULL;
-
-		    if (*p == '|')
-			nextcmd = p + 1;
-		    else if (line_arg != NULL && *skipwhite(line_arg) != NUL)
-			nextcmd = line_arg;
-		    else if (*p != NUL && *p != '"' && p_verbose > 0)
-			give_warning2(eap->cmdidx == CMD_def
-			    ? (char_u *)_("W1001: Text found after :enddef: %s")
-			    : (char_u *)_("W22: Text found after :endfunction: %s"),
-			     p, TRUE);
-		    if (nextcmd != NULL)
-		    {
-			// Another command follows. If the line came from "eap"
-			// we can simply point into it, otherwise we need to
-			// change "eap->cmdlinep".
-			eap->nextcmd = nextcmd;
-			if (line_to_free != NULL)
-			{
-			    vim_free(*eap->cmdlinep);
-			    *eap->cmdlinep = line_to_free;
-			    line_to_free = NULL;
-			}
-		    }
-		    break;
-		}
-	    }
-
-	    // Check for mismatched "endfunc" or "enddef".
-	    // We don't check for "def" inside "func" thus we also can't check
-	    // for "enddef".
-	    // We continue to find the end of the function, although we might
-	    // not find it.
-	    else if (nesting_def[nesting])
-	    {
-		if (checkforcmd(&p, "endfunction", 4) && *p != ':')
-		    emsg(_(e_mismatched_endfunction));
-	    }
-	    else if (eap->cmdidx == CMD_def && checkforcmd(&p, "enddef", 4))
-		emsg(_(e_mismatched_enddef));
-
-	    // Increase indent inside "if", "while", "for" and "try", decrease
-	    // at "end".
-	    if (indent > 2 && (*p == '}' || STRNCMP(p, "end", 3) == 0))
-		indent -= 2;
-	    else if (STRNCMP(p, "if", 2) == 0
-		    || STRNCMP(p, "wh", 2) == 0
-		    || STRNCMP(p, "for", 3) == 0
-		    || STRNCMP(p, "try", 3) == 0)
-		indent += 2;
-
-	    // Check for defining a function inside this function.
-	    // Only recognize "def" inside "def", not inside "function",
-	    // For backwards compatibility, see Test_function_python().
-	    c = *p;
-	    if (is_function_cmd(&p)
-		    || (eap->cmdidx == CMD_def && checkforcmd(&p, "def", 3)))
-	    {
-		if (*p == '!')
-		    p = skipwhite(p + 1);
-		p += eval_fname_script(p);
-		vim_free(trans_function_name(&p, NULL, TRUE, 0, NULL,
-								  NULL, NULL));
-		if (*skipwhite(p) == '(')
-		{
-		    if (nesting == MAX_FUNC_NESTING - 1)
-			emsg(_(e_function_nesting_too_deep));
-		    else
-		    {
-			++nesting;
-			nesting_def[nesting] = (c == 'd');
-			indent += 2;
-		    }
-		}
-	    }
-
-	    // Check for ":append", ":change", ":insert".  Not for :def.
-	    p = skip_range(p, FALSE, NULL);
-	    if (eap->cmdidx != CMD_def
-		&& ((p[0] == 'a' && (!ASCII_ISALPHA(p[1]) || p[1] == 'p'))
-		    || (p[0] == 'c'
-			&& (!ASCII_ISALPHA(p[1]) || (p[1] == 'h'
-				&& (!ASCII_ISALPHA(p[2]) || (p[2] == 'a'
-					&& (STRNCMP(&p[3], "nge", 3) != 0
-					    || !ASCII_ISALPHA(p[6])))))))
-		    || (p[0] == 'i'
-			&& (!ASCII_ISALPHA(p[1]) || (p[1] == 'n'
-				&& (!ASCII_ISALPHA(p[2])
-				    || (p[2] == 's'
-					&& (!ASCII_ISALPHA(p[3])
-						|| p[3] == 'e'))))))))
-		skip_until = vim_strsave((char_u *)".");
-
-	    // Check for ":python <<EOF", ":tcl <<EOF", etc.
-	    arg = skipwhite(skiptowhite(p));
-	    if (arg[0] == '<' && arg[1] =='<'
-		    && ((p[0] == 'p' && p[1] == 'y'
-				    && (!ASCII_ISALNUM(p[2]) || p[2] == 't'
-					|| ((p[2] == '3' || p[2] == 'x')
-						   && !ASCII_ISALPHA(p[3]))))
-			|| (p[0] == 'p' && p[1] == 'e'
-				    && (!ASCII_ISALPHA(p[2]) || p[2] == 'r'))
-			|| (p[0] == 't' && p[1] == 'c'
-				    && (!ASCII_ISALPHA(p[2]) || p[2] == 'l'))
-			|| (p[0] == 'l' && p[1] == 'u' && p[2] == 'a'
-				    && !ASCII_ISALPHA(p[3]))
-			|| (p[0] == 'r' && p[1] == 'u' && p[2] == 'b'
-				    && (!ASCII_ISALPHA(p[3]) || p[3] == 'y'))
-			|| (p[0] == 'm' && p[1] == 'z'
-				    && (!ASCII_ISALPHA(p[2]) || p[2] == 's'))
-			))
-	    {
-		// ":python <<" continues until a dot, like ":append"
-		p = skipwhite(arg + 2);
-		if (STRNCMP(p, "trim", 4) == 0)
-		{
-		    // Ignore leading white space.
-		    p = skipwhite(p + 4);
-		    heredoc_trimmed = vim_strnsave(theline,
-						 skipwhite(theline) - theline);
-		}
-		if (*p == NUL)
-		    skip_until = vim_strsave((char_u *)".");
-		else
-		    skip_until = vim_strnsave(p, skiptowhite(p) - p);
-		getline_options = GETLINE_NONE;
-		is_heredoc = TRUE;
-	    }
-
-	    // Check for ":cmd v =<< [trim] EOF"
-	    //       and ":cmd [a, b] =<< [trim] EOF"
-	    //       and "lines =<< [trim] EOF" for Vim9
-	    // Where "cmd" can be "let", "var", "final" or "const".
-	    arg = skipwhite(skiptowhite(p));
-	    if (*arg == '[')
-		arg = vim_strchr(arg, ']');
-	    if (arg != NULL)
-	    {
-		int found = (eap->cmdidx == CMD_def && arg[0] == '='
-					     && arg[1] == '<' && arg[2] =='<');
-
-		if (!found)
-		    // skip over the argument after "cmd"
-		    arg = skipwhite(skiptowhite(arg));
-		if (found || (arg[0] == '=' && arg[1] == '<' && arg[2] =='<'
-			&& (checkforcmd(&p, "let", 2)
-			    || checkforcmd(&p, "var", 3)
-			    || checkforcmd(&p, "final", 5)
-			    || checkforcmd(&p, "const", 5))))
-		{
-		    p = skipwhite(arg + 3);
-		    if (STRNCMP(p, "trim", 4) == 0)
-		    {
-			// Ignore leading white space.
-			p = skipwhite(p + 4);
-			heredoc_trimmed = vim_strnsave(theline,
-						 skipwhite(theline) - theline);
-		    }
-		    skip_until = vim_strnsave(p, skiptowhite(p) - p);
-		    getline_options = GETLINE_NONE;
-		    is_heredoc = TRUE;
-		}
-	    }
-	}
-
-	// Add the line to the function.
-	if (ga_grow(&newlines, 1 + sourcing_lnum_off) == FAIL)
-	    goto erret;
-
-	// Copy the line to newly allocated memory.  get_one_sourceline()
-	// allocates 250 bytes per line, this saves 80% on average.  The cost
-	// is an extra alloc/free.
-	p = vim_strsave(theline);
-	if (p == NULL)
-	    goto erret;
-	((char_u **)(newlines.ga_data))[newlines.ga_len++] = p;
-
-	// Add NULL lines for continuation lines, so that the line count is
-	// equal to the index in the growarray.
-	while (sourcing_lnum_off-- > 0)
-	    ((char_u **)(newlines.ga_data))[newlines.ga_len++] = NULL;
-
-	// Check for end of eap->arg.
-	if (line_arg != NULL && *line_arg == NUL)
-	    line_arg = NULL;
-    }
-
-    // Don't define the function when skipping commands or when an error was
-    // detected.
-    if (eap->skip || did_emsg)
+    if (get_function_body(eap, &newlines, line_arg, &line_to_free) == FAIL)
 	goto erret;
 
     /*
@@ -3880,12 +4127,10 @@ define_function(exarg_T *eap, char_u *name_arg)
 	varargs = FALSE;
 
 	// parse the return type, if any
-	if (ret_type == NULL)
-	    fp->uf_ret_type = &t_void;
-	else
+	if (parse_return_type(fp, ret_type) == FAIL)
 	{
-	    p = ret_type;
-	    fp->uf_ret_type = parse_type(&p, &fp->uf_type_list, TRUE);
+	    SOURCING_LNUM = lnum_save;
+	    goto erret;
 	}
 	SOURCING_LNUM = lnum_save;
     }
@@ -3934,19 +4179,23 @@ define_function(exarg_T *eap, char_u *name_arg)
 erret:
     ga_clear_strings(&newargs);
     ga_clear_strings(&default_args);
+    if (fp != NULL)
+    {
+	ga_init(&fp->uf_args);
+	ga_init(&fp->uf_def_args);
+    }
 errret_2:
     ga_clear_strings(&newlines);
+    if (fp != NULL)
+	VIM_CLEAR(fp->uf_arg_types);
 ret_free:
     ga_clear_strings(&argtypes);
-    vim_free(skip_until);
-    vim_free(heredoc_trimmed);
     vim_free(line_to_free);
     vim_free(fudi.fd_newkey);
     if (name != name_arg)
 	vim_free(name);
     vim_free(ret_type);
     did_emsg |= saved_did_emsg;
-    need_wait_return |= saved_wait_return;
 
     return fp;
 }
@@ -3962,7 +4211,7 @@ ex_function(exarg_T *eap)
 
 /*
  * :defcompile - compile all :def functions in the current script that need to
- * be compiled.  Except dead functions.
+ * be compiled.  Except dead functions.  Doesn't do profiling.
  */
     void
 ex_defcompile(exarg_T *eap UNUSED)
@@ -3982,7 +4231,7 @@ ex_defcompile(exarg_T *eap UNUSED)
 		    && ufunc->uf_def_status == UF_TO_BE_COMPILED
 		    && (ufunc->uf_flags & FC_DEAD) == 0)
 	    {
-		compile_def_function(ufunc, FALSE, NULL);
+		(void)compile_def_function(ufunc, FALSE, FALSE, NULL);
 
 		if (func_hashtab.ht_changed != changed)
 		{
@@ -4200,7 +4449,6 @@ ex_delfunction(exarg_T *eap)
 		// do remove it from the hashtable.
 		if (func_remove(fp))
 		    fp->uf_refcount--;
-		fp->uf_flags |= FC_DELETED;
 	    }
 	    else
 		func_clear_free(fp, FALSE);
@@ -4227,23 +4475,21 @@ func_unref(char_u *name)
 #endif
 	    internal_error("func_unref()");
     }
-    if (fp != NULL && --fp->uf_refcount <= 0)
-    {
-	// Only delete it when it's not being used.  Otherwise it's done
-	// when "uf_calls" becomes zero.
-	if (fp->uf_calls == 0)
-	    func_clear_free(fp, FALSE);
-    }
+    func_ptr_unref(fp);
 }
 
 /*
  * Unreference a Function: decrement the reference count and free it when it
  * becomes zero.
+ * Also when it becomes one and uf_partial points to the function.
  */
     void
 func_ptr_unref(ufunc_T *fp)
 {
-    if (fp != NULL && --fp->uf_refcount <= 0)
+    if (fp != NULL && (--fp->uf_refcount <= 0
+		|| (fp->uf_refcount == 1 && fp->uf_partial != NULL
+					 && fp->uf_partial->pt_refcount <= 1
+					 && fp->uf_partial->pt_func == fp)))
     {
 	// Only delete it when it's not being used.  Otherwise it's done
 	// when "uf_calls" becomes zero.
@@ -4680,7 +4926,7 @@ get_func_line(
 	    SOURCING_LNUM = fcp->linenr;
 #ifdef FEAT_PROFILE
 	    if (do_profiling == PROF_YES)
-		func_line_start(cookie);
+		func_line_start(cookie, SOURCING_LNUM);
 #endif
 	}
     }

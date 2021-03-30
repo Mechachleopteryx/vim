@@ -79,6 +79,7 @@ let s:filename_checks = {
     \ 'bzl': ['file.bazel', 'file.bzl', 'WORKSPACE'],
     \ 'bc': ['file.bc'],
     \ 'bdf': ['file.bdf'],
+    \ 'beancount': ['file.beancount'],
     \ 'bib': ['file.bib'],
     \ 'bindzone': ['named.root', '/bind/db.file', '/named/db.file', 'any/bind/db.file', 'any/named/db.file'],
     \ 'blank': ['file.bl'],
@@ -162,6 +163,7 @@ let s:filename_checks = {
     \ 'elinks': ['elinks.conf'],
     \ 'elm': ['file.elm'],
     \ 'elmfilt': ['filter-rules'],
+    \ 'epuppet': ['file.epp'],
     \ 'erlang': ['file.erl', 'file.hrl', 'file.yaws'],
     \ 'eruby': ['file.erb', 'file.rhtml'],
     \ 'esmtprc': ['anyesmtprc', 'esmtprc', 'some-esmtprc'],
@@ -174,6 +176,7 @@ let s:filename_checks = {
     \ 'factor': ['file.factor'],
     \ 'falcon': ['file.fal'],
     \ 'fan': ['file.fan', 'file.fwt'],
+    \ 'fennel': ['file.fnl'],
     \ 'fetchmail': ['.fetchmailrc'],
     \ 'fgl': ['file.4gl', 'file.4gh', 'file.m4gl'],
     \ 'focexec': ['file.fex', 'file.focexec'],
@@ -371,6 +374,7 @@ let s:filename_checks = {
     \ 'po': ['file.po', 'file.pot'],
     \ 'pod': ['file.pod'],
     \ 'pod6': ['file.pod6'],
+    \ 'poke': ['file.pk'],
     \ 'postscr': ['file.ps', 'file.pfa', 'file.afm', 'file.eps', 'file.epsf', 'file.epsi', 'file.ai'],
     \ 'pov': ['file.pov'],
     \ 'povini': ['.povrayrc'],
@@ -390,6 +394,7 @@ let s:filename_checks = {
     \ 'quake': ['anybaseq2/file.cfg', 'anyid1/file.cfg', 'quake3/file.cfg', 'baseq2/file.cfg', 'id1/file.cfg', 'quake1/file.cfg', 'some-baseq2/file.cfg', 'some-id1/file.cfg', 'some-quake1/file.cfg'],
     \ 'radiance': ['file.rad', 'file.mat'],
     \ 'ratpoison': ['.ratpoisonrc', 'ratpoisonrc'],
+    \ 'rbs': ['file.rbs'],
     \ 'rc': ['file.rc', 'file.rch'],
     \ 'rcs': ['file,v'],
     \ 'readline': ['.inputrc', 'inputrc'],
@@ -406,7 +411,7 @@ let s:filename_checks = {
     \ 'rpl': ['file.rpl'],
     \ 'rst': ['file.rst'],
     \ 'rtf': ['file.rtf'],
-    \ 'ruby': ['.irbrc', 'irbrc', 'file.rb', 'file.rbw', 'file.gemspec', 'file.ru', 'Gemfile', 'file.builder', 'file.rxml', 'file.rjs', 'file.rant', 'file.rake', 'rakefile', 'Rakefile', 'rantfile', 'Rantfile', 'rakefile-file', 'Rakefile-file'],
+    \ 'ruby': ['.irbrc', 'irbrc', 'file.rb', 'file.rbw', 'file.gemspec', 'file.ru', 'Gemfile', 'file.builder', 'file.rxml', 'file.rjs', 'file.rant', 'file.rake', 'rakefile', 'Rakefile', 'rantfile', 'Rantfile', 'rakefile-file', 'Rakefile-file', 'Puppetfile'],
     \ 'rust': ['file.rs'],
     \ 'samba': ['smb.conf'],
     \ 'sas': ['file.sas'],
@@ -423,6 +428,7 @@ let s:filename_checks = {
     \ 'sdc': ['file.sdc'],
     \ 'sdl': ['file.sdl', 'file.pr'],
     \ 'sed': ['file.sed'],
+    \ 'svelte': ['file.svelte'],
     \ 'sensors': ['/etc/sensors.conf', '/etc/sensors3.conf', 'any/etc/sensors.conf', 'any/etc/sensors3.conf'],
     \ 'services': ['/etc/services', 'any/etc/services'],
     \ 'setserial': ['/etc/serial.conf', 'any/etc/serial.conf'],
@@ -532,7 +538,7 @@ let s:filename_checks = {
     \ 'xhtml': ['file.xhtml', 'file.xht'],
     \ 'xinetd': ['/etc/xinetd.conf', '/etc/xinetd.d/file', 'any/etc/xinetd.conf', 'any/etc/xinetd.d/file'],
     \ 'xmath': ['file.msc', 'file.msf'],
-    \ 'xml': ['/etc/blkid.tab', '/etc/blkid.tab.old', 'file.xmi', 'file.csproj', 'file.csproj.user', 'file.ui', 'file.tpm', '/etc/xdg/menus/file.menu', 'fglrxrc', 'file.xlf', 'file.xliff', 'file.xul', 'file.wsdl', 'file.wpl', 'any/etc/blkid.tab', 'any/etc/blkid.tab.old', 'any/etc/xdg/menus/file.menu'],
+    \ 'xml': ['/etc/blkid.tab', '/etc/blkid.tab.old', 'file.xmi', 'file.csproj', 'file.csproj.user', 'file.ui', 'file.tpm', '/etc/xdg/menus/file.menu', 'fglrxrc', 'file.xlf', 'file.xliff', 'file.xul', 'file.wsdl', 'file.wpl', 'any/etc/blkid.tab', 'any/etc/blkid.tab.old', 'any/etc/xdg/menus/file.menu', 'file.atom', 'file.rss'],
     \ 'xmodmap': ['anyXmodmap', 'Xmodmap', 'some-Xmodmap', 'some-xmodmap', 'some-xmodmap-file', 'xmodmap', 'xmodmap-file'],
     \ 'xf86conf': ['xorg.conf', 'xorg.conf-4'],
     \ 'xpm2': ['file.xpm2'],
@@ -639,6 +645,7 @@ let s:script_checks = {
       \         ['// -*- C++ -*-']],
       \ 'yaml': [['%YAML 1.2']],
       \ 'pascal': [['#!/path/instantfpc']],
+      \ 'fennel': [['#!/path/fennel']],
       \ }
 
 " Various forms of "env" optional arguments.
@@ -733,6 +740,23 @@ func Test_ts_file()
   filetype off
 endfunc
 
+func Test_ttl_file()
+  filetype on
+
+  call writefile(['@base <http://example.org/> .'], 'Xfile.ttl')
+  split Xfile.ttl
+  call assert_equal('turtle', &filetype)
+  bwipe!
+
+  call writefile(['looks like Tera Term Language'], 'Xfile.ttl')
+  split Xfile.ttl
+  call assert_equal('teraterm', &filetype)
+  bwipe!
+
+  call delete('Xfile.ttl')
+  filetype off
+endfunc
+
 func Test_pp_file()
   filetype on
 
@@ -757,7 +781,7 @@ func Test_pp_file()
   call assert_equal('pascal', &filetype)
   bwipe!
 
-  call delete('Xfile.ts')
+  call delete('Xfile.pp')
   filetype off
 endfunc
 

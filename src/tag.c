@@ -1308,7 +1308,7 @@ find_tagfunc_tags(
     int         result = FAIL;
     typval_T	args[4];
     typval_T	rettv;
-    char_u      flagString[3];
+    char_u      flagString[4];
     dict_T	*d;
     taggy_T	*tag = &curwin->w_tagstack[curwin->w_tagstackidx];
 
@@ -1335,9 +1335,10 @@ find_tagfunc_tags(
     args[3].v_type = VAR_UNKNOWN;
 
     vim_snprintf((char *)flagString, sizeof(flagString),
-		 "%s%s",
+		 "%s%s%s",
 		 g_tag_at_cursor      ? "c": "",
-		 flags & TAG_INS_COMP ? "i": "");
+		 flags & TAG_INS_COMP ? "i": "",
+		 flags & TAG_REGEXP   ? "r": "");
 
     save_pos = curwin->w_cursor;
     result = call_vim_function(curbuf->b_p_tfu, 3, args, &rettv);
@@ -3509,6 +3510,11 @@ jumpto_tag(
 #ifdef FEAT_SEARCH_EXTRA
 	// Save value of no_hlsearch, jumping to a tag is not a real search
 	save_no_hlsearch = no_hlsearch;
+#endif
+#ifdef FEAT_PROP_POPUP
+	// getfile() may have cleared options, apply 'previewpopup' again.
+	if (g_do_tagpreview != 0 && *p_pvp != NUL)
+	    parse_previewpopup(curwin);
 #endif
 
 	/*

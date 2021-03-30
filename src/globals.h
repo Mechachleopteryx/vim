@@ -1342,26 +1342,16 @@ EXTERN char_u	*homedir INIT(= NULL);
 // directory is not a local directory, globaldir is NULL.
 EXTERN char_u	*globaldir INIT(= NULL);
 
-// Characters from 'listchars' option
-EXTERN int	lcs_eol INIT(= '$');
-EXTERN int	lcs_ext INIT(= NUL);
-EXTERN int	lcs_prec INIT(= NUL);
-EXTERN int	lcs_nbsp INIT(= NUL);
-EXTERN int	lcs_space INIT(= NUL);
-EXTERN int	lcs_tab1 INIT(= NUL);
-EXTERN int	lcs_tab2 INIT(= NUL);
-EXTERN int	lcs_tab3 INIT(= NUL);
-EXTERN int	lcs_trail INIT(= NUL);
-#ifdef FEAT_CONCEAL
-EXTERN int	lcs_conceal INIT(= ' ');
-#endif
-
 // Characters from 'fillchars' option
 EXTERN int	fill_stl INIT(= ' ');
 EXTERN int	fill_stlnc INIT(= ' ');
 EXTERN int	fill_vert INIT(= ' ');
 EXTERN int	fill_fold INIT(= '-');
+EXTERN int	fill_foldopen INIT(= '-');
+EXTERN int	fill_foldclosed INIT(= '+');
+EXTERN int	fill_foldsep INIT(= '|');
 EXTERN int	fill_diff INIT(= '-');
+EXTERN int	fill_eob INIT(= '~');
 
 #ifdef FEAT_FOLDING
 EXTERN int	disable_fold_update INIT(= 0);
@@ -1870,6 +1860,7 @@ EXTERN int  nfa_fail_for_testing INIT(= FALSE);
 EXTERN int  no_query_mouse_for_testing INIT(= FALSE);
 EXTERN int  ui_delay_for_testing INIT(= 0);
 EXTERN int  reset_term_props_on_termresponse INIT(= FALSE);
+EXTERN long override_sysinfo_uptime INIT(= -1);
 
 EXTERN int  in_free_unref_items INIT(= FALSE);
 #endif
@@ -1907,7 +1898,8 @@ EXTERN listitem_T range_list_item;
 // Passed to an eval() function to enable evaluation.
 EXTERN evalarg_T EVALARG_EVALUATE
 # ifdef DO_INIT
-	= {EVAL_EVALUATE, 0, NULL, NULL, NULL, {0, 0, 0, 0, NULL}, NULL, NULL}
+	= {EVAL_EVALUATE, 0, NULL, NULL, NULL, {0, 0, 0, 0, NULL},
+							      NULL, NULL, NULL}
 # endif
 	;
 #endif

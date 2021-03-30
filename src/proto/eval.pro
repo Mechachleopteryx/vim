@@ -1,6 +1,6 @@
 /* eval.c */
-varnumber_T num_divide(varnumber_T n1, varnumber_T n2);
-varnumber_T num_modulus(varnumber_T n1, varnumber_T n2);
+varnumber_T num_divide(varnumber_T n1, varnumber_T n2, int *failed);
+varnumber_T num_modulus(varnumber_T n1, varnumber_T n2, int *failed);
 void eval_init(void);
 void eval_clear(void);
 void fill_evalarg_from_eap(evalarg_T *evalarg, exarg_T *eap, int skip);
@@ -11,6 +11,7 @@ int eval_expr_to_bool(typval_T *expr, int *error);
 char_u *eval_to_string_skip(char_u *arg, exarg_T *eap, int skip);
 int skip_expr(char_u **pp, evalarg_T *evalarg);
 int skip_expr_concatenate(char_u **arg, char_u **start, char_u **end, evalarg_T *evalarg);
+char_u *typval2string(typval_T *tv, int convert);
 char_u *eval_to_string_eap(char_u *arg, int convert, exarg_T *eap);
 char_u *eval_to_string(char_u *arg, int convert);
 char_u *eval_to_string_safe(char_u *arg, int use_sandbox);
@@ -24,7 +25,7 @@ void *call_func_retlist(char_u *func, int argc, typval_T *argv);
 int eval_foldexpr(char_u *arg, int *cp);
 char_u *get_lval(char_u *name, typval_T *rettv, lval_T *lp, int unlet, int skip, int flags, int fne_flags);
 void clear_lval(lval_T *lp);
-void set_var_lval(lval_T *lp, char_u *endp, typval_T *rettv, int copy, int flags, char_u *op);
+void set_var_lval(lval_T *lp, char_u *endp, typval_T *rettv, int copy, int flags, char_u *op, int var_idx);
 void *eval_for_line(char_u *arg, int *errp, exarg_T *eap, evalarg_T *evalarg);
 void skip_for_lines(void *fi_void, evalarg_T *evalarg);
 int next_for_item(void *fi_void, char_u *arg);

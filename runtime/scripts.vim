@@ -1,7 +1,7 @@
 " Vim support file to detect file types in scripts
 "
 " Maintainer:	Bram Moolenaar <Bram@vim.org>
-" Last change:	2020 Aug 15
+" Last change:	2021 Jan 22
 
 " This file is called by an autocommand for every file that has just been
 " loaded into a buffer.  It checks if the type of file can be recognized by
@@ -185,6 +185,10 @@ if s:line1 =~# "^#!"
     " Free Pascal
   elseif s:name =~# 'instantfpc\>'
     set ft=pascal
+
+    " Fennel
+  elseif s:name =~# 'fennel\>'
+    set ft=fennel
 
   endif
   unlet s:name

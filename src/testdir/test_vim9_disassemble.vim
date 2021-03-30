@@ -422,7 +422,7 @@ def Test_disassemble_try()
   var res = execute('disass s:ScriptFuncTry')
   assert_match('<SNR>\d*_ScriptFuncTry\_s*' ..
         'try\_s*' ..
-        '\d TRY catch -> \d\+, finally -> \d\+\_s*' ..
+        '\d TRY catch -> \d\+, finally -> \d\+, endtry -> \d\+\_s*' ..
         'echo "yes"\_s*' ..
         '\d PUSHS "yes"\_s*' ..
         '\d ECHO 1\_s*' ..
@@ -437,6 +437,7 @@ def Test_disassemble_try()
         '\d\+ PUSHS "no"\_s*' ..
         '\d\+ ECHO 1\_s*' ..
         'finally\_s*' ..
+        '\d\+ FINALLY\_s*' ..
         'throw "end"\_s*' ..
         '\d\+ PUSHS "end"\_s*' ..
         '\d\+ THROW\_s*' ..
@@ -640,18 +641,25 @@ def Test_disassemble_update_instr()
 enddef
 
 
-def FuncWithDefault(arg: string = 'default'): string
-  return arg
+def FuncWithDefault(arg: string = 'default', nr = 77): string
+  return arg .. nr
 enddef
 
 def Test_disassemble_call_default()
   var res = execute('disass FuncWithDefault')
   assert_match('FuncWithDefault\_s*' ..
+        '\d JUMP_IF_ARG_SET arg\[-2\] -> 3\_s*' ..
         '\d PUSHS "default"\_s*' ..
+        '\d STORE arg\[-2]\_s*' ..
+        '3 JUMP_IF_ARG_SET arg\[-1\] -> 6\_s*' ..
+        '\d PUSHNR 77\_s*' ..
         '\d STORE arg\[-1]\_s*' ..
-        'return arg\_s*' ..
+        'return arg .. nr\_s*' ..
+        '6 LOAD arg\[-2]\_s*' ..
         '\d LOAD arg\[-1]\_s*' ..
-        '\d RETURN',
+        '\d 2STRING stack\[-1]\_s*' ..
+        '\d\+ CONCAT\_s*' ..
+        '\d\+ RETURN',
         res)
 enddef
 
@@ -762,7 +770,7 @@ def Test_disassemble_const_expr()
             'if has("gui_running")\_s*' ..
             '\d PUSHS "gui_running"\_s*' ..
             '\d BCALL has(argc 1)\_s*' ..
-            '\d COND2BOOL\_s*' ..
+            '\d 2BOOL (!!val)\_s*' ..
             '\d JUMP_IF_FALSE -> \d\_s*' ..
             '  echo "yes"\_s*' ..
             '\d PUSHS "yes"\_s*' ..
@@ -934,7 +942,7 @@ def Test_disassemble_lambda_with_type()
         'return Ref(g:value)\_s*' ..
         '\d LOADG g:value\_s*' ..
         '\d LOAD $0\_s*' ..
-        '\d CHECKTYPE number stack\[-2\]\_s*' ..
+        '\d CHECKTYPE number stack\[-2\] arg 1\_s*' ..
         '\d PCALL (argc 1)\_s*' ..
         '\d RETURN',
         instr)
@@ -946,7 +954,7 @@ def NestedOuter()
   enddef
 enddef
 
-def Test_nested_func()
+def Test_disassemble_nested_func()
    var instr = execute('disassemble NestedOuter')
    assert_match('NestedOuter\_s*' ..
         'def g:Inner()\_s*' ..
@@ -964,7 +972,7 @@ def NestedDefList()
   def /Info/
 enddef
 
-def Test_nested_def_list()
+def Test_disassemble_nested_def_list()
    var instr = execute('disassemble NestedDefList')
    assert_match('NestedDefList\_s*' ..
         'def\_s*' ..
@@ -1060,7 +1068,6 @@ def Test_disassemble_for_loop_eval()
         '\d STORE -1 in $1\_s*' ..
         '\d PUSHS "\["one", "two"\]"\_s*' ..
         '\d BCALL eval(argc 1)\_s*' ..
-        '\d CHECKTYPE list<any> stack\[-1\]\_s*' ..
         '\d FOR $1 -> \d\+\_s*' ..
         '\d STORE $2\_s*' ..
         'res ..= str\_s*' ..
@@ -1070,7 +1077,7 @@ def Test_disassemble_for_loop_eval()
         '\d\+ CONCAT\_s*' ..
         '\d\+ STORE $0\_s*' ..
         'endfor\_s*' ..
-        '\d\+ JUMP -> 6\_s*' ..
+        '\d\+ JUMP -> 5\_s*' ..
         '\d\+ DROP\_s*' ..
         'return res\_s*' ..
         '\d\+ LOAD $0\_s*' ..
@@ -1106,6 +1113,63 @@ def Test_disassemble_for_loop_unpack()
         '\d\+ ECHO 2\_s*' ..
         'endfor\_s*' ..
         '\d\+ JUMP -> 8\_s*' ..
+        '\d\+ DROP\_s*' ..
+        '\d\+ RETURN 0',
+        instr)
+enddef
+
+def ForLoopContinue()
+  for nr in [1, 2]
+    try
+      echo "ok"
+      try
+        echo "deeper"
+      catch
+        continue
+      endtry
+    catch
+      echo "not ok"
+    endtry
+  endfor
+enddef
+
+def Test_disassemble_for_loop_continue()
+  var instr = execute('disassemble ForLoopContinue')
+  assert_match('ForLoopContinue\_s*' ..
+        'for nr in \[1, 2]\_s*' ..
+        '0 STORE -1 in $0\_s*' ..
+        '1 PUSHNR 1\_s*' ..
+        '2 PUSHNR 2\_s*' ..
+        '3 NEWLIST size 2\_s*' ..
+        '4 FOR $0 -> 22\_s*' ..
+        '5 STORE $1\_s*' ..
+        'try\_s*' ..
+        '6 TRY catch -> 17, endtry -> 20\_s*' ..
+        'echo "ok"\_s*' ..
+        '7 PUSHS "ok"\_s*' ..
+        '8 ECHO 1\_s*' ..
+        'try\_s*' ..
+        '9 TRY catch -> 13, endtry -> 15\_s*' ..
+        'echo "deeper"\_s*' ..
+        '10 PUSHS "deeper"\_s*' ..
+        '11 ECHO 1\_s*' ..
+        'catch\_s*' ..
+        '12 JUMP -> 15\_s*' ..
+        '13 CATCH\_s*' ..
+        'continue\_s*' ..
+        '14 TRY-CONTINUE 2 levels -> 4\_s*' ..
+        'endtry\_s*' ..
+        '15 ENDTRY\_s*' ..
+        'catch\_s*' ..
+        '16 JUMP -> 20\_s*' ..
+        '17 CATCH\_s*' ..
+        'echo "not ok"\_s*' ..
+        '18 PUSHS "not ok"\_s*' ..
+        '19 ECHO 1\_s*' ..
+        'endtry\_s*' ..
+        '20 ENDTRY\_s*' ..
+        'endfor\_s*' ..
+        '21 JUMP -> 4\_s*' ..
         '\d\+ DROP\_s*' ..
         '\d\+ RETURN 0',
         instr)
@@ -1838,8 +1902,81 @@ def Test_silent()
         '\d PUSHS "error"\_s*' ..
         '\d ECHOERR 1\_s*' ..
         '\d CMDMOD_REV\_s*' ..
-        '\d RETURN 0',
+        '\d\+ RETURN 0',
         res)
+enddef
+
+def s:SilentIf()
+  silent if 4 == g:five
+  silent elseif 4 == g:five
+  endif
+enddef
+
+def Test_silent_if()
+  var res = execute('disass s:SilentIf')
+  assert_match('<SNR>\d*_SilentIf\_s*' ..
+        'silent if 4 == g:five\_s*' ..
+        '\d\+ CMDMOD silent\_s*' ..
+        '\d\+ PUSHNR 4\_s*' ..
+        '\d\+ LOADG g:five\_s*' ..
+        '\d\+ COMPAREANY ==\_s*' ..
+        '\d\+ CMDMOD_REV\_s*' ..
+        '\d\+ JUMP_IF_FALSE -> \d\+\_s*' ..
+        'silent elseif 4 == g:five\_s*' ..
+        '\d\+ JUMP -> \d\+\_s*' ..
+        '\d\+ CMDMOD silent\_s*' ..
+        '\d\+ PUSHNR 4\_s*' ..
+        '\d\+ LOADG g:five\_s*' ..
+        '\d\+ COMPAREANY ==\_s*' ..
+        '\d\+ CMDMOD_REV\_s*' ..
+        '\d\+ JUMP_IF_FALSE -> \d\+\_s*' ..
+        'endif\_s*' ..
+        '\d\+ RETURN 0',
+        res)
+enddef
+
+def s:SilentFor()
+  silent for i in [0]
+  endfor
+enddef
+
+def Test_silent_for()
+  var res = execute('disass s:SilentFor')
+  assert_match('<SNR>\d*_SilentFor\_s*' ..
+        'silent for i in \[0\]\_s*' ..
+        '\d CMDMOD silent\_s*' ..
+        '\d STORE -1 in $0\_s*' ..
+        '\d PUSHNR 0\_s*' ..
+        '\d NEWLIST size 1\_s*' ..
+        '\d CMDMOD_REV\_s*' ..
+        '5 FOR $0 -> 8\_s*' ..
+        '\d STORE $1\_s*' ..
+        'endfor\_s*' ..
+        '\d JUMP -> 5\_s*' ..
+        '8 DROP\_s*' ..
+        '\d RETURN 0\_s*',
+        res)
+enddef
+
+def s:SilentWhile()
+  silent while g:not
+  endwhile
+enddef
+
+def Test_silent_while()
+  var res = execute('disass s:SilentWhile')
+  assert_match('<SNR>\d*_SilentWhile\_s*' ..
+        'silent while g:not\_s*' ..
+        '0 CMDMOD silent\_s*' ..
+        '\d LOADG g:not\_s*' ..
+        '\d COND2BOOL\_s*' ..
+        '\d CMDMOD_REV\_s*' ..
+        '\d JUMP_IF_FALSE -> 6\_s*' ..
+
+        'endwhile\_s*' ..
+        '\d JUMP -> 0\_s*' ..
+        '6 RETURN 0\_s*',
+         res)
 enddef
 
 def s:SilentReturn(): string
@@ -1856,5 +1993,30 @@ def Test_silent_return()
         '\d RETURN',
         res)
 enddef
+
+def s:Profiled(): string
+  echo "profiled"
+  return "done"
+enddef
+
+def Test_profiled()
+  if !has('profile')
+    MissingFeature 'profile'
+  endif
+  var res = execute('disass! s:Profiled')
+  assert_match('<SNR>\d*_Profiled\_s*' ..
+        'echo "profiled"\_s*' ..
+        '\d PROFILE START line 1\_s*' ..
+        '\d PUSHS "profiled"\_s*' ..
+        '\d ECHO 1\_s*' ..
+        'return "done"\_s*' ..
+        '\d PROFILE END\_s*' ..
+        '\d PROFILE START line 2\_s*' ..
+        '\d PUSHS "done"\_s*' ..
+        '\d RETURN\_s*' ..
+        '\d PROFILE END',
+        res)
+enddef
+
 
 " vim: ts=8 sw=2 sts=2 expandtab tw=80 fdm=marker

@@ -124,6 +124,10 @@ func Test_max()
 
   call assert_fails('call max(1)', 'E712:')
   call assert_fails('call max(v:none)', 'E712:')
+
+  " check we only get one error
+  call assert_fails('call max([#{}, [1]])', ['E728:', 'E728:'])
+  call assert_fails('call max(#{a: {}, b: [1]})', ['E728:', 'E728:'])
 endfunc
 
 func Test_min()
@@ -137,6 +141,10 @@ func Test_min()
 
   call assert_fails('call min(1)', 'E712:')
   call assert_fails('call min(v:none)', 'E712:')
+
+  " check we only get one error
+  call assert_fails('call min([[1], #{}])', ['E745:', 'E745:'])
+  call assert_fails('call min(#{a: [1], b: #{}})', ['E745:', 'E745:'])
 endfunc
 
 func Test_strwidth()
@@ -1421,6 +1429,14 @@ func Test_input_func()
         \ .. "\<C-A>\<CR>", 'xt')
   delfunc Tcomplete
   call assert_equal('item1 item2 item3', c)
+
+  " Test for using special characters as default input
+  call feedkeys(":let c = input('name? ', \"x\\<BS>y\")\<CR>\<CR>", 'xt')
+  call assert_equal('y', c)
+
+  " Test for using <CR> as default input
+  call feedkeys(":let c = input('name? ', \"\\<CR>\")\<CR>x\<CR>", 'xt')
+  call assert_equal(' x', c)
 
   call assert_fails("call input('F:', '', 'invalid')", 'E180:')
   call assert_fails("call input('F:', '', [])", 'E730:')

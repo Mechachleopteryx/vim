@@ -485,6 +485,30 @@ func Test_list_mappings()
   nmapclear
 endfunc
 
+func Test_expr_map_gets_cursor()
+  new
+  call setline(1, ['one', 'some w!rd'])
+  func StoreColumn()
+    let g:exprLine = line('.')
+    let g:exprCol = col('.')
+    return 'x'
+  endfunc
+  nnoremap <expr> x StoreColumn()
+  2
+  nmap ! f!<Ignore>x
+  call feedkeys("!", 'xt')
+  call assert_equal('some wrd', getline(2))
+  call assert_equal(2, g:exprLine)
+  call assert_equal(7, g:exprCol)
+
+  bwipe!
+  unlet g:exprLine
+  unlet g:exprCol
+  delfunc StoreColumn
+  nunmap x
+  nunmap !
+endfunc
+
 func Test_expr_map_restore_cursor()
   CheckScreendump
 
@@ -1363,6 +1387,16 @@ func Test_map_cmdkey_redo()
   call delete('Xcmdtext')
   delfunc SelectDash
   ounmap i-
+endfunc
+
+" Test for using <script> with a map to remap characters in rhs
+func Test_script_local_remap()
+  new
+  inoremap <buffer> <SID>xyz mno
+  inoremap <buffer> <script> abc st<SID>xyzre
+  normal iabc
+  call assert_equal('stmnore', getline(1))
+  bwipe!
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

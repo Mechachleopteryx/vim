@@ -2053,24 +2053,25 @@ set_termname(char_u *term)
     set_mouse_termcode(KS_MOUSE, (char_u *)"\233M");
 #endif
 
-#if (defined(UNIX) || defined(VMS))
+#ifdef FEAT_MOUSE_XTERM
     // focus reporting is supported by xterm compatible terminals and tmux.
     if (use_xterm_like_mouse(term))
     {
 	char_u name[3];
-	name[0] = (int)KS_EXTRA;
-	name[2] = NUL;
 
 	// handle focus in event
-	name[1] = (int)KE_FOCUSGAINED;
+	name[0] = KS_EXTRA;
+	name[1] = KE_FOCUSGAINED;
+	name[2] = NUL;
 	add_termcode(name, (char_u *)"\033[I", FALSE);
 
 	// handle focus out event
-	name[1] = (int)KE_FOCUSLOST;
+	name[1] = KE_FOCUSLOST;
 	add_termcode(name, (char_u *)"\033[O", FALSE);
 
 	focus_mode = TRUE;
 	focus_state = TRUE;
+	need_gather = TRUE;
     }
 #endif
 
@@ -2544,7 +2545,7 @@ out_flush(void)
 	// set out_pos to 0 before ui_write, to avoid recursiveness
 	len = out_pos;
 	out_pos = 0;
-	ui_write(out_buf, len);
+	ui_write(out_buf, len, FALSE);
 #ifdef FEAT_JOB_CHANNEL
 	if (ch_log_output)
 	{
@@ -2713,7 +2714,7 @@ out_str_cf(char_u *s)
 		else
 		{
 		    ++p;
-		    do_sleep(duration);
+		    do_sleep(duration, FALSE);
 		}
 # else
 		// Rely on the terminal library to sleep.
@@ -3364,8 +3365,9 @@ win_new_shellsize(void)
 	ui_new_shellsize();
     if (old_Rows != Rows)
     {
-	// if 'window' uses the whole screen, keep it using that
-	if (p_window == old_Rows - 1 || old_Rows == 0)
+	// If 'window' uses the whole screen, keep it using that.
+	// Don't change it when set with "-w size" on the command line.
+	if (p_window == old_Rows - 1 || (old_Rows == 0 && p_window == 0))
 	    p_window = Rows - 1;
 	old_Rows = Rows;
 	shell_new_rows();	// update window sizes
@@ -3618,9 +3620,9 @@ starttermcap(void)
 	out_str(T_KS);			// start "keypad transmit" mode
 	out_str(T_BE);			// enable bracketed paste mode
 
-#if (defined(UNIX) || defined(VMS))
-	// enable xterm's focus reporting mode
-	if (focus_mode && *T_FE != NUL)
+#if defined(UNIX) || defined(VMS)
+	// Enable xterm's focus reporting mode when 'esckeys' is set.
+	if (focus_mode && p_ek && *T_FE != NUL)
 	    out_str(T_FE);
 #endif
 
@@ -3676,9 +3678,9 @@ stoptermcap(void)
 	ch_log_output = TRUE;
 #endif
 
-#if (defined(UNIX) || defined(VMS))
-	// disable xterm's focus reporting mode
-	if (focus_mode && *T_FD != NUL)
+#if defined(UNIX) || defined(VMS)
+	// Disable xterm's focus reporting mode if 'esckeys' is set.
+	if (focus_mode && p_ek && *T_FD != NUL)
 	    out_str(T_FD);
 #endif
 
@@ -5339,6 +5341,8 @@ check_termcode(
 	else
 #endif // FEAT_GUI
 	{
+	    int  mouse_index_found = -1;
+
 	    for (idx = 0; idx < tc_len; ++idx)
 	    {
 		/*
@@ -5376,9 +5380,24 @@ check_termcode(
 			    }
 		    }
 
-		    key_name[0] = termcodes[idx].name[0];
-		    key_name[1] = termcodes[idx].name[1];
-		    break;
+		    // The mouse termcode "ESC [" is also the prefix of
+		    // "ESC [ I" (focus gained).  Only use it when there is
+		    // no other match.  Do use it when a digit is following to
+		    // avoid waiting for more bytes.
+		    if (slen == 2 && len > 2
+			    && termcodes[idx].code[0] == ESC
+			    && termcodes[idx].code[1] == '['
+			    && !isdigit(tp[2]))
+		    {
+			if (mouse_index_found < 0)
+			    mouse_index_found = idx;
+		    }
+		    else
+		    {
+			key_name[0] = termcodes[idx].name[0];
+			key_name[1] = termcodes[idx].name[1];
+			break;
+		    }
 		}
 
 		/*
@@ -5389,7 +5408,7 @@ check_termcode(
 		 * When there is a modifier the * matches a number.
 		 * When there is no modifier the ;* or * is omitted.
 		 */
-		if (termcodes[idx].modlen > 0)
+		if (termcodes[idx].modlen > 0 && mouse_index_found < 0)
 		{
 		    int at_code;
 
@@ -5441,6 +5460,11 @@ check_termcode(
 			break;
 		    }
 		}
+	    }
+	    if (idx == tc_len && mouse_index_found >= 0)
+	    {
+		key_name[0] = termcodes[mouse_index_found].name[0];
+		key_name[1] = termcodes[mouse_index_found].name[1];
 	    }
 	}
 

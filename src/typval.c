@@ -344,27 +344,33 @@ tv_get_float(typval_T *varp)
  * Give an error and return FAIL unless "tv" is a string.
  */
     int
-check_for_string(typval_T *tv)
+check_for_string_arg(typval_T *args, int idx)
 {
-    if (tv->v_type != VAR_STRING)
+    if (args[idx].v_type != VAR_STRING)
     {
-	emsg(_(e_stringreq));
+	if (idx >= 0)
+	    semsg(_(e_string_required_for_argument_nr), idx + 1);
+	else
+	    emsg(_(e_stringreq));
 	return FAIL;
     }
     return OK;
 }
 
 /*
- * Give an error and return FAIL unless "tv" is a non-empty string.
+ * Give an error and return FAIL unless "args[idx]" is a non-empty string.
  */
     int
-check_for_nonempty_string(typval_T *tv)
+check_for_nonempty_string_arg(typval_T *args, int idx)
 {
-    if (check_for_string(tv) == FAIL)
+    if (check_for_string_arg(args, idx) == FAIL)
 	return FAIL;
-    if (tv->vval.v_string == NULL || *tv->vval.v_string == NUL)
+    if (args[idx].vval.v_string == NULL || *args[idx].vval.v_string == NUL)
     {
-	emsg(_(e_non_empty_string_required));
+	if (idx >= 0)
+	    semsg(_(e_non_empty_string_required_for_argument_nr), idx + 1);
+	else
+	    emsg(_(e_non_empty_string_required));
 	return FAIL;
     }
     return OK;
@@ -386,6 +392,19 @@ tv_get_string(typval_T *varp)
     static char_u   mybuf[NUMBUFLEN];
 
     return tv_get_string_buf(varp, mybuf);
+}
+
+/*
+ * Like tv_get_string() but don't allow number to string conversion for Vim9.
+ */
+    char_u *
+tv_get_string_strict(typval_T *varp)
+{
+    static char_u   mybuf[NUMBUFLEN];
+    char_u	    *res =  tv_get_string_buf_chk_strict(
+						 varp, mybuf, in_vim9script());
+
+    return res != NULL ? res : (char_u *)"";
 }
 
     char_u *
@@ -410,9 +429,20 @@ tv_get_string_chk(typval_T *varp)
     char_u *
 tv_get_string_buf_chk(typval_T *varp, char_u *buf)
 {
+    return tv_get_string_buf_chk_strict(varp, buf, FALSE);
+}
+
+    char_u *
+tv_get_string_buf_chk_strict(typval_T *varp, char_u *buf, int strict)
+{
     switch (varp->v_type)
     {
 	case VAR_NUMBER:
+	    if (strict)
+	    {
+		emsg(_(e_using_number_as_string));
+		break;
+	    }
 	    vim_snprintf((char *)buf, NUMBUFLEN, "%lld",
 					    (varnumber_T)varp->vval.v_number);
 	    return buf;
@@ -903,8 +933,13 @@ typval_compare(
     return OK;
 }
 
+/*
+ * Convert any type to a string, never give an error.
+ * When "quotes" is TRUE add quotes to a string.
+ * Returns an allocated string.
+ */
     char_u *
-typval_tostring(typval_T *arg)
+typval_tostring(typval_T *arg, int quotes)
 {
     char_u	*tofree;
     char_u	numbuf[NUMBUFLEN];
@@ -912,10 +947,18 @@ typval_tostring(typval_T *arg)
 
     if (arg == NULL)
 	return vim_strsave((char_u *)"(does not exist)");
-    ret = tv2string(arg, &tofree, numbuf, 0);
-    // Make a copy if we have a value but it's not in allocated memory.
-    if (ret != NULL && tofree == NULL)
-	ret = vim_strsave(ret);
+    if (!quotes && arg->v_type == VAR_STRING)
+    {
+	ret = vim_strsave(arg->vval.v_string == NULL ? (char_u *)""
+							 : arg->vval.v_string);
+    }
+    else
+    {
+	ret = tv2string(arg, &tofree, numbuf, 0);
+	// Make a copy if we have a value but it's not in allocated memory.
+	if (ret != NULL && tofree == NULL)
+	    ret = vim_strsave(ret);
+    }
     return ret;
 }
 
@@ -1032,7 +1075,9 @@ tv_equal(
 	return r;
     }
 
-    if (tv1->v_type != tv2->v_type)
+    if (tv1->v_type != tv2->v_type
+	    && ((tv1->v_type != VAR_BOOL && tv1->v_type != VAR_SPECIAL)
+		|| (tv2->v_type != VAR_BOOL && tv2->v_type != VAR_SPECIAL)))
 	return FALSE;
 
     switch (tv1->v_type)
@@ -1576,11 +1621,12 @@ tv_get_lnum(typval_T *argvars)
 
     if (argvars[0].v_type != VAR_STRING || !in_vim9script())
 	lnum = (linenr_T)tv_get_number_chk(&argvars[0], NULL);
-    if (lnum <= 0)  // no valid number, try using arg like line()
+    if (lnum <= 0 && argvars[0].v_type != VAR_NUMBER)
     {
 	int	fnum;
 	pos_T	*fp = var2fpos(&argvars[0], TRUE, &fnum, FALSE);
 
+	// no valid number, try using arg like line()
 	if (fp != NULL)
 	    lnum = fp->lnum;
     }

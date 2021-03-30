@@ -2584,9 +2584,11 @@ func Test_normal40_ctrl_bsl()
   call assert_false(&insertmode)
   call assert_beeps("normal! \<C-\>\<C-A>", 'xt')
 
-  " Using CTRL-\ CTRL-N in cmd window should close the window
-  call feedkeys("q:\<C-\>\<C-N>", 'xt')
-  call assert_equal('', getcmdwintype())
+  if has('cmdwin')
+    " Using CTRL-\ CTRL-N in cmd window should close the window
+    call feedkeys("q:\<C-\>\<C-N>", 'xt')
+    call assert_equal('', getcmdwintype())
+  endif
 
   " clean up
   bw!
@@ -3205,6 +3207,13 @@ func Test_normal_delete_cmd()
   " delete to a readonly register
   call setline(1, ['abcd'])
   call assert_beeps('normal ":d2l')
+
+  " D and d with 'nomodifiable'
+  call setline(1, ['abcd'])
+  setlocal nomodifiable
+  call assert_fails('normal D', 'E21:')
+  call assert_fails('normal d$', 'E21:')
+
   close!
 endfunc
 
