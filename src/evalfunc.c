@@ -3131,7 +3131,7 @@ f_call(typval_T *argvars, typval_T *rettv)
     dot = vim_strchr(func, '.');
     if (dot != NULL)
     {
-	imported_T *import = find_imported(func, dot - func, TRUE, NULL);
+	imported_T *import = find_imported(func, dot - func, TRUE);
 
 	if (import != NULL && SCRIPT_ID_VALID(import->imp_sid))
 	{
@@ -4453,6 +4453,12 @@ common_function(typval_T *argvars, typval_T *rettv, int is_funcref)
 		{
 		    pt->pt_name = name;
 		    func_ref(name);
+		}
+
+		if (arg_pt != NULL)
+		{
+		    pt->pt_outer_partial = arg_pt;
+		    ++arg_pt->pt_refcount;
 		}
 	    }
 	    rettv->v_type = VAR_PARTIAL;
@@ -5991,7 +5997,7 @@ f_has(typval_T *argvars, typval_T *rettv)
 #endif
 		},
 	{"sodium",
-#ifdef FEAT_SODIUM
+#if defined(FEAT_SODIUM) && !defined(DYNAMIC_SODIUM)
 		1
 #else
 		0
@@ -6311,6 +6317,10 @@ f_has(typval_T *argvars, typval_T *rettv)
 #ifdef DYNAMIC_TCL
 	else if (STRICMP(name, "tcl") == 0)
 	    n = tcl_enabled(FALSE);
+#endif
+#ifdef DYNAMIC_SODIUM
+	else if (STRICMP(name, "sodium") == 0)
+	    n = sodium_enabled(FALSE);
 #endif
 #if defined(FEAT_TERMINAL) && defined(MSWIN)
 	else if (STRICMP(name, "terminal") == 0)
@@ -10330,7 +10340,7 @@ f_visualmode(typval_T *argvars, typval_T *rettv)
 f_wildmenumode(typval_T *argvars UNUSED, typval_T *rettv UNUSED)
 {
 #ifdef FEAT_WILDMENU
-    if (wild_menu_showing)
+    if (wild_menu_showing || ((State & CMDLINE) && cmdline_pum_active()))
 	rettv->vval.v_number = 1;
 #endif
 }
