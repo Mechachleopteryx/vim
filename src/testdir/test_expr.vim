@@ -43,7 +43,7 @@ func Test_version()
   call assert_false(has('patch-9.9.1'))
 endfunc
 
-func Test_op_trinary()
+func Test_op_ternary()
   let lines =<< trim END
       call assert_equal('yes', 1 ? 'yes' : 'no')
       call assert_equal('no', 0 ? 'yes' : 'no')
@@ -157,12 +157,60 @@ endfunc
 
 func Test_loop_over_null_list()
   let lines =<< trim END
-      VAR null_list = test_null_list()
-      for i in null_list
+      VAR nulllist = test_null_list()
+      for i in nulllist
         call assert_report('should not get here')
       endfor
   END
   call v9.CheckLegacyAndVim9Success(lines)
+
+  let lines =<< trim END
+      var nulllist = null_list
+      for i in nulllist
+        call assert_report('should not get here')
+      endfor
+  END
+  call v9.CheckDefAndScriptSuccess(lines)
+
+  let lines =<< trim END
+      let nulllist = null_list
+      for i in nulllist
+        call assert_report('should not get here')
+      endfor
+  END
+  call v9.CheckScriptFailure(lines, 'E121: Undefined variable: null_list')
+endfunc
+
+func Test_compare_with_null()
+  let s:value = v:null
+  call assert_true(s:value == v:null)
+  let s:value = v:true
+  call assert_false(s:value == v:null)
+  let s:value = v:none
+  call assert_false(s:value == v:null)
+  let s:value = 0
+  call assert_true(s:value == v:null)
+  if has('float')
+    let s:value = 0.0
+    call assert_true(s:value == v:null)
+  endif
+  let s:value = ''
+  call assert_false(s:value == v:null)
+  let s:value = 0z
+  call assert_false(s:value == v:null)
+  let s:value = []
+  call assert_false(s:value == v:null)
+  let s:value = {}
+  call assert_false(s:value == v:null)
+  let s:value = function('len')
+  call assert_false(s:value == v:null)
+  if has('job')
+    let s:value = test_null_job()
+    call assert_true(s:value == v:null)
+    let s:value = test_null_channel()
+    call assert_true(s:value == v:null)
+  endif
+  unlet s:value
 endfunc
 
 func Test_setreg_null_list()
@@ -840,6 +888,135 @@ func Test_float_compare()
       call assert_true((1.0 / 0) != -(2.0 / 0))
   END
   call v9.CheckLegacyAndVim9Success(lines)
+endfunc
+
+func Test_string_interp()
+  let lines =<< trim END
+    call assert_equal('', $"")
+    call assert_equal('foobar', $"foobar")
+    #" Escaping rules.
+    call assert_equal('"foo"{bar}', $"\"foo\"{{bar}}")
+    call assert_equal('"foo"{bar}', $'"foo"{{bar}}')
+    call assert_equal('foobar', $"{"foo"}" .. $'{'bar'}')
+    #" Whitespace before/after the expression.
+    call assert_equal('3', $"{ 1 + 2 }")
+    #" String conversion.
+    call assert_equal('hello from ' .. v:version, $"hello from {v:version}")
+    call assert_equal('hello from ' .. v:version, $'hello from {v:version}')
+    #" Paper over a small difference between VimScript behaviour.
+    call assert_equal(string(v:true), $"{v:true}")
+    call assert_equal('(1+1=2)', $"(1+1={1 + 1})")
+    #" Hex-escaped opening brace: char2nr('{') == 0x7b
+    call assert_equal('esc123ape', $"esc{123}ape")
+    call assert_equal('me{}me', $"me{"\x7b"}\x7dme")
+    VAR var1 = "sun"
+    VAR var2 = "shine"
+    call assert_equal('sunshine', $"{var1}{var2}")
+    call assert_equal('sunsunsun', $"{var1->repeat(3)}")
+    #" Multibyte strings.
+    call assert_equal('say ハロー・ワールド', $"say {'ハロー・ワールド'}")
+    #" Nested.
+    call assert_equal('foobarbaz', $"foo{$"{'bar'}"}baz")
+    #" Do not evaluate blocks when the expr is skipped.
+    VAR tmp = 0
+    if v:false
+      echo "${ LET tmp += 1 }"
+    endif
+    call assert_equal(0, tmp)
+
+    #" Stray closing brace.
+    call assert_fails('echo $"moo}"', 'E1278:')
+    #" Undefined variable in expansion.
+    call assert_fails('echo $"{moo}"', 'E121:')
+    #" Empty blocks are rejected.
+    call assert_fails('echo $"{}"', 'E15:')
+    call assert_fails('echo $"{   }"', 'E15:')
+  END
+  call v9.CheckLegacyAndVim9Success(lines)
+
+  let lines =<< trim END
+    call assert_equal('5', $"{({x -> x + 1})(4)}")
+  END
+  call v9.CheckLegacySuccess(lines)
+
+  let lines =<< trim END
+    call assert_equal('5', $"{((x) => x + 1)(4)}")
+    call assert_fails('echo $"{ # foo }"', 'E1279:')
+  END
+  call v9.CheckDefAndScriptSuccess(lines)
+endfunc
+
+" Test for bitwise left and right shift (<< and >>)
+func Test_bitwise_shift()
+  let lines =<< trim END
+    call assert_equal(16, 1 << 4)
+    call assert_equal(2, 16 >> 3)
+    call assert_equal(0, 0 << 2)
+    call assert_equal(0, 0 >> 4)
+    call assert_equal(3, 3 << 0)
+    call assert_equal(3, 3 >> 0)
+    call assert_equal(0, 0 >> 4)
+    call assert_equal(0, 999999 >> 100)
+    call assert_equal(0, 999999 << 100)
+    call assert_equal(-1, -1 >> 0)
+    call assert_equal(-1, -1 << 0)
+    VAR a = 8
+    VAR b = 2
+    call assert_equal(2, a >> b)
+    call assert_equal(32, a << b)
+    #" operator precedence
+    call assert_equal(48, 1 + 2 << 5 - 1)
+    call assert_equal(3, 8 + 4 >> 4 - 2)
+    call assert_true(1 << 2 < 1 << 3)
+    call assert_true(1 << 4 > 1 << 3)
+    VAR val = 0
+    for i in range(0, v:numbersize - 2)
+        LET val = or(val, 1 << i)
+    endfor
+    call assert_equal(v:numbermax, val)
+    LET val = v:numbermax
+    for i in range(0, v:numbersize - 2)
+        LET val = and(val, invert(1 << i))
+    endfor
+    #" -1 has all the bits set
+    call assert_equal(-2, -1 << 1)
+    call assert_equal(-4, -1 << 2)
+    call assert_equal(-8, -1 << 3)
+    if v:numbersize == 64
+      call assert_equal(0x7fffffffffffffff, -1 >> 1)
+      call assert_equal(0x3fffffffffffffff, -1 >> 2)
+      call assert_equal(0x1fffffffffffffff, -1 >> 3)
+    endif
+    call assert_equal(0, val)
+    #" multiple operators
+    call assert_equal(16, 1 << 2 << 2)
+    call assert_equal(4, 64 >> 2 >> 2)
+    call assert_true(1 << 2 << 2 == 256 >> 2 >> 2)
+  END
+  call v9.CheckLegacyAndVim9Success(lines)
+
+  call v9.CheckLegacyAndVim9Failure(['VAR v = 2 << -1'], ['E1283:', 'E1283:', 'E1283:'])
+  call v9.CheckLegacyAndVim9Failure(['VAR a = 2', 'VAR b = -1', 'VAR v = a << b'], ['E1283:', 'E1283:', 'E1283:'])
+  call v9.CheckLegacyAndVim9Failure(['VAR v = "8" >> 2'], ['E1282:', 'E1282:', 'E1282:'])
+  call v9.CheckLegacyAndVim9Failure(['VAR v = 1 << "2"'], ['E1282:', 'E1282:', 'E1282:'])
+  call v9.CheckLegacyAndVim9Failure(['VAR a = "8"', 'VAR b = 2', 'VAR v = a << b'], ['E1282:', 'E1012:', 'E1282:'])
+  call v9.CheckLegacyAndVim9Failure(['VAR a = 8', 'VAR b = "2"', 'VAR v = a >> b'], ['E1282:', 'E1012:', 'E1282:'])
+  call v9.CheckLegacyAndVim9Failure(['VAR v = ![] << 1'], ['E745:', 'E1012:', 'E1282:'])
+  call v9.CheckLegacyAndVim9Failure(['VAR v = 1 << ![]'], ['E745:', 'E1012:', 'E1282:'])
+  call v9.CheckLegacyAndVim9Failure(['VAR v = ![] >> 1'], ['E745:', 'E1012:', 'E1282:'])
+  call v9.CheckLegacyAndVim9Failure(['VAR v = 1 >> ![]'], ['E745:', 'E1012:', 'E1282:'])
+  call v9.CheckDefAndScriptFailure(['echo 1<< 2'], ['E1004:', 'E1004:'])
+  call v9.CheckDefAndScriptFailure(['echo 1 <<2'], ['E1004:', 'E1004:'])
+  call v9.CheckDefAndScriptFailure(['echo 1>> 2'], ['E1004:', 'E1004:'])
+  call v9.CheckDefAndScriptFailure(['echo 1 >>2'], ['E1004:', 'E1004:'])
+
+  let lines =<< trim END
+     var a = 1
+             <<
+             4
+     assert_equal(16, a)
+  END
+  call v9.CheckDefAndScriptSuccess(lines)
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

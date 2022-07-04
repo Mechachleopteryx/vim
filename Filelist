@@ -15,7 +15,6 @@ SRC_ALL =	\
 		.gitignore \
 		.hgignore \
 		.lgtm.yml \
-		.travis.yml \
 		.appveyor.yml \
 		.codecov.yml \
 		ci/appveyor.bat \
@@ -198,7 +197,6 @@ SRC_ALL =	\
 		src/testdir/view_util.vim \
 		src/testdir/test[0-9]*.ok \
 		src/testdir/test77a.ok \
-		src/testdir/test83-tags? \
 		src/testdir/test77a.com \
 		src/testdir/test_*.vim \
 		src/testdir/python2/*.py \
@@ -447,10 +445,6 @@ SRC_UNIX =	\
 		src/create_cmdidxs.vim \
 		src/create_nvcmdidxs.c \
 		src/create_nvcmdidxs.vim \
-		src/gui_at_fs.c \
-		src/gui_at_sb.c \
-		src/gui_at_sb.h \
-		src/gui_athena.c \
 		src/gui_gtk.c \
 		src/gui_gtk_f.c \
 		src/gui_gtk_f.h \
@@ -475,7 +469,6 @@ SRC_UNIX =	\
 		src/osdef1.h.in \
 		src/osdef2.h.in \
 		src/pathdef.sh \
-		src/proto/gui_athena.pro \
 		src/proto/gui_gtk.pro \
 		src/proto/gui_gtk_x11.pro \
 		src/proto/gui_gtk_gresources.pro \
@@ -580,7 +573,6 @@ SRC_DOS =	\
 		src/testdir/Make_ming.mak \
 		src/testdir/dos.vim \
 		src/uninstall.c \
-		src/vim.def \
 		src/vim.rc \
 		src/vim.manifest \
 		src/vimrun.c \
@@ -632,6 +624,7 @@ SRC_DOS_BIN =	\
 		src/xpm/x86/lib-vc14/libXpm.lib \
 		src/xpm/x86/lib/libXpm.a \
 		src/xpm/x86/lib/libXpm.lib \
+		runtime/bitmaps/vim.ico \
 		nsis/icons.zip \
 
 # source files for Amiga, DOS, etc. (also in the extra archive)
@@ -727,6 +720,7 @@ RT_ALL =	\
 		runtime/doc/xxd.1 \
 		runtime/ftoff.vim \
 		runtime/gvimrc_example.vim \
+		runtime/import/dist/vimhelp.vim \
 		runtime/macros/README.txt \
 		runtime/macros/editexisting.vim \
 		runtime/macros/hanoi/click.me \
@@ -1000,6 +994,7 @@ LANG_GEN = \
 		runtime/doc/*-tr.1 \
 		runtime/doc/*-tr.UTF-8.1 \
 		runtime/lang/README.txt \
+		runtime/lang/Makefile \
 		runtime/lang/menu_*.vim \
 		runtime/keymap/README.txt \
 		runtime/keymap/*.vim \
@@ -1021,6 +1016,8 @@ LANG_GEN = \
 		runtime/spell/README.txt \
 		runtime/spell/??/*.diff \
 		runtime/spell/??/main.aap \
+		runtime/spell/sr/README_sr.txt \
+		runtime/spell/sr/convert.vim \
 		runtime/spell/tet/*.diff \
 		runtime/spell/tet/main.aap \
 		runtime/spell/check/main.aap \

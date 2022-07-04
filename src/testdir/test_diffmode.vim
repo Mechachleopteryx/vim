@@ -34,7 +34,8 @@ func Test_diff_fold_sync()
   call win_gotoid(winone)
   call assert_equal(23, getcurpos()[1])
 
-  call assert_equal(1, g:update_count)
+  " depending on how redraw is done DiffUpdated may be triggered once or twice
+  call assert_inrange(1, 2, g:update_count)
   au! DiffUpdated
 
   windo diffoff
@@ -1056,6 +1057,32 @@ func Test_diff_with_cursorline()
   call delete('Xtest_diff_cursorline')
 endfunc
 
+func Test_diff_with_cursorline_number()
+  CheckScreendump
+
+  let lines =<< trim END
+      hi CursorLine ctermbg=red ctermfg=white
+      hi CursorLineNr ctermbg=white ctermfg=black cterm=underline
+      set cursorline number
+      call setline(1, ["baz", "foo", "foo", "bar"])
+      2
+      vnew
+      call setline(1, ["foo", "foo", "bar"])
+      windo diffthis
+      1wincmd w
+  END
+  call writefile(lines, 'Xtest_diff_cursorline_number')
+  let buf = RunVimInTerminal('-S Xtest_diff_cursorline_number', {})
+
+  call VerifyScreenDump(buf, 'Test_diff_with_cursorline_number_01', {})
+  call term_sendkeys(buf, ":set cursorlineopt=number\r")
+  call VerifyScreenDump(buf, 'Test_diff_with_cursorline_number_02', {})
+
+  " clean up
+  call StopVimInTerminal(buf)
+  call delete('Xtest_diff_cursorline_number')
+endfunc
+
 func Test_diff_with_cursorline_breakindent()
   CheckScreendump
 
@@ -1508,5 +1535,98 @@ func Test_diff_foldinvert()
   %bw!
   set scrollbind&
 endfunc
+
+" This was scrolling for 'cursorbind' but 'scrollbind' is more important
+func Test_diff_scroll()
+  CheckScreendump
+
+  let left =<< trim END
+      line 1
+      line 2
+      line 3
+      line 4
+
+      // Common block
+      // one
+      // containing
+      // four lines
+
+      // Common block
+      // two
+      // containing
+      // four lines
+  END
+  call writefile(left, 'Xleft')
+  let right =<< trim END
+      line 1
+      line 2
+      line 3
+      line 4
+
+      Lorem
+      ipsum
+      dolor
+      sit
+      amet,
+      consectetur
+      adipiscing
+      elit.
+      Etiam
+      luctus
+      lectus
+      sodales,
+      dictum
+
+      // Common block
+      // one
+      // containing
+      // four lines
+
+      Vestibulum
+      tincidunt
+      aliquet
+      nulla.
+
+      // Common block
+      // two
+      // containing
+      // four lines
+  END
+  call writefile(right, 'Xright')
+  let buf = RunVimInTerminal('-d Xleft Xright', {'rows': 12})
+  call term_sendkeys(buf, "\<C-W>\<C-W>jjjj")
+  call VerifyScreenDump(buf, 'Test_diff_scroll_1', {})
+  call term_sendkeys(buf, "j")
+  call VerifyScreenDump(buf, 'Test_diff_scroll_2', {})
+
+  call StopVimInTerminal(buf)
+  call delete('Xleft')
+  call delete('Xright')
+endfunc
+
+" This was trying to update diffs for a buffer being closed
+func Test_diff_only()
+  silent! lfile
+  set diff
+  lopen
+  norm o
+  silent! norm o
+
+  set nodiff
+  %bwipe!
+endfunc
+
+" This was causing invalid diff block values
+" FIXME: somehow this causes a valgrind error when run directly but not when
+" run as a test.
+func Test_diff_manipulations()
+  set diff
+  split 0
+  sil! norm RdoobdeuRdoobdeuRdoobdeu
+
+  set nodiff
+  %bwipe!
+endfunc
+
 
 " vim: shiftwidth=2 sts=2 expandtab

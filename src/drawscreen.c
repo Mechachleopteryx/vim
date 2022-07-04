@@ -555,7 +555,7 @@ win_redr_status(win_T *wp, int ignore_pum UNUSED)
 	if (stl_connected(wp))
 	    fillchar = fillchar_status(&attr, wp);
 	else
-	    fillchar = fillchar_vsep(&attr);
+	    fillchar = fillchar_vsep(&attr, wp);
 	screen_putchar(fillchar, row, W_ENDCOL(wp), attr);
     }
     busy = FALSE;
@@ -686,7 +686,7 @@ win_redr_ruler(win_T *wp, int always, int ignore_pum)
     /*
      * Check if not in Insert mode and the line is empty (will show "0-1").
      */
-    if (!(State & INSERT)
+    if ((State & MODE_INSERT) == 0
 		&& *ml_get_buf(wp->w_buffer, wp->w_cursor.lnum, FALSE) == NUL)
 	empty_line = TRUE;
 
@@ -1038,7 +1038,7 @@ redraw_win_toolbar(win_T *wp)
     }
     wp->w_winbar_items[item_idx].wb_menu = NULL; // end marker
 
-    screen_line(wp->w_winrow, wp->w_wincol, wp->w_width, wp->w_width, 0);
+    screen_line(wp, wp->w_winrow, wp->w_wincol, wp->w_width, wp->w_width, 0);
 }
 #endif
 
@@ -1112,10 +1112,10 @@ fold_line(
 # define RL_MEMSET(p, v, l) \
     do { \
 	if (wp->w_p_rl) \
-	    for (ri = 0; ri < l; ++ri) \
+	    for (ri = 0; ri < (l); ++ri) \
 	       ScreenAttrs[off + (wp->w_width - (p) - (l)) + ri] = v; \
 	 else \
-	    for (ri = 0; ri < l; ++ri) \
+	    for (ri = 0; ri < (l); ++ri) \
 	       ScreenAttrs[off + (p) + ri] = v; \
     } while (0)
 #else
@@ -1246,7 +1246,8 @@ fold_line(
 
     txtcol = col;	// remember where text starts
 
-    // 5. move the text to current_ScreenLine.  Fill up with "fill_fold".
+    // 5. move the text to current_ScreenLine.  Fill up with "fold" from
+    //    'fillchars'.
     //    Right-left text is put in columns 0 - number-col, normal text is put
     //    in columns number-col - window-width.
     col = text_to_screenline(wp, text, col);
@@ -1262,23 +1263,25 @@ fold_line(
 #endif
 	    )
     {
+	int c = wp->w_fill_chars.fold;
+
 	if (enc_utf8)
 	{
-	    if (fill_fold >= 0x80)
+	    if (c >= 0x80)
 	    {
-		ScreenLinesUC[off + col] = fill_fold;
+		ScreenLinesUC[off + col] = c;
 		ScreenLinesC[0][off + col] = 0;
 		ScreenLines[off + col] = 0x80; // avoid storing zero
 	    }
 	    else
 	    {
 		ScreenLinesUC[off + col] = 0;
-		ScreenLines[off + col] = fill_fold;
+		ScreenLines[off + col] = c;
 	    }
 	    col++;
 	}
 	else
-	    ScreenLines[off + col++] = fill_fold;
+	    ScreenLines[off + col++] = c;
     }
 
     if (text != buf)
@@ -1371,7 +1374,8 @@ fold_line(
     }
 #endif
 
-    screen_line(row + W_WINROW(wp), wp->w_wincol, wp->w_width, wp->w_width, 0);
+    screen_line(wp, row + W_WINROW(wp), wp->w_wincol,
+						  wp->w_width, wp->w_width, 0);
 
     // Update w_cline_height and w_cline_folded if the cursor line was
     // updated (saves a call to plines() later).
@@ -1463,9 +1467,9 @@ win_update(win_T *wp)
 #ifdef FEAT_SYN_HL
     // remember what happened to the previous line, to know if
     // check_visual_highlight() can be used
-#define DID_NONE 1	// didn't update a line
-#define DID_LINE 2	// updated a normal line
-#define DID_FOLD 3	// updated a folded line
+# define DID_NONE 1	// didn't update a line
+# define DID_LINE 2	// updated a normal line
+# define DID_FOLD 3	// updated a folded line
     int		did_update = DID_NONE;
     linenr_T	syntax_last_parsed = 0;		// last parsed text line
 #endif
@@ -1473,9 +1477,6 @@ win_update(win_T *wp)
     linenr_T	mod_bot = 0;
 #if defined(FEAT_SYN_HL) || defined(FEAT_SEARCH_EXTRA)
     int		save_got_int;
-#endif
-#ifdef SYN_TIME_LIMIT
-    proftime_T	syntax_tm;
 #endif
 
 #if defined(FEAT_SEARCH_EXTRA) || defined(FEAT_CLIPBOARD)
@@ -1618,6 +1619,19 @@ win_update(win_T *wp)
 	    }
 #endif
 	}
+
+#ifdef FEAT_SEARCH_EXTRA
+	if (search_hl_has_cursor_lnum > 0)
+	{
+	    // CurSearch was used last time, need to redraw the line with it to
+	    // avoid having two matches highlighted with CurSearch.
+	    if (mod_top == 0 || mod_top > search_hl_has_cursor_lnum)
+		mod_top = search_hl_has_cursor_lnum;
+	    if (mod_bot == 0 || mod_bot < search_hl_has_cursor_lnum + 1)
+		mod_bot = search_hl_has_cursor_lnum + 1;
+	}
+#endif
+
 #ifdef FEAT_FOLDING
 	if (mod_top != 0 && hasAnyFolding(wp))
 	{
@@ -1684,6 +1698,10 @@ win_update(win_T *wp)
     }
     wp->w_redraw_top = 0;	// reset for next time
     wp->w_redraw_bot = 0;
+#ifdef FEAT_SEARCH_EXTRA
+    search_hl_has_cursor_lnum = 0;
+#endif
+
 
     // When only displaying the lines at the top, set top_end.  Used when
     // window has scrolled down for msg_scrolled.
@@ -1730,7 +1748,7 @@ win_update(win_T *wp)
 	if (mod_top != 0
 		&& wp->w_topline == mod_top
 		&& (!wp->w_lines[0].wl_valid
-		    || wp->w_topline <= wp->w_lines[0].wl_lnum))
+		    || wp->w_topline == wp->w_lines[0].wl_lnum))
 	{
 	    // w_topline is the first changed line and window is not scrolled,
 	    // the scrolling from changed lines will be done further down.
@@ -1947,9 +1965,8 @@ win_update(win_T *wp)
 
 	if (VIsual_active)
 	{
-	    if (VIsual_active
-		    && (VIsual_mode != wp->w_old_visual_mode
-			|| type == INVERTED_ALL))
+	    if (VIsual_mode != wp->w_old_visual_mode
+		|| type == INVERTED_ALL)
 	    {
 		// If the type of Visual selection changed, redraw the whole
 		// selection.  Also when the ownership of the X selection is
@@ -2166,8 +2183,8 @@ win_update(win_T *wp)
 #endif
 #ifdef SYN_TIME_LIMIT
     // Set the time limit to 'redrawtime'.
-    profile_setlimit(p_rdt, &syntax_tm);
-    syn_set_timeout(&syntax_tm);
+    redrawtime_limit_set = TRUE;
+    init_regexp_timeout(p_rdt);
 #endif
 #ifdef FEAT_FOLDING
     win_foldinfo.fi_level = 0;
@@ -2243,8 +2260,8 @@ win_update(win_T *wp)
 #endif
 				))))
 #ifdef FEAT_SYN_HL
-		|| (wp->w_p_cul && (lnum == wp->w_cursor.lnum
-					     || lnum == wp->w_last_cursorline))
+		|| (wp->w_p_cul && lnum == wp->w_cursor.lnum)
+		|| lnum == wp->w_last_cursorline
 #endif
 				)
 	{
@@ -2508,11 +2525,11 @@ win_update(win_T *wp)
 	}
 	else
 	{
-	    if (wp->w_p_rnu)
+	    if (wp->w_p_rnu && wp->w_last_cursor_lnum_rnu != wp->w_cursor.lnum)
 	    {
 #ifdef FEAT_FOLDING
-		// 'relativenumber' set: The text doesn't need to be drawn, but
-		// the number column nearly always does.
+		// 'relativenumber' set and the cursor moved vertically: The
+		// text doesn't need to be drawn, but the number column does.
 		fold_count = foldedCount(wp, lnum, &win_foldinfo);
 		if (fold_count != 0)
 		    fold_line(wp, fold_count, &win_foldinfo, lnum, row);
@@ -2548,6 +2565,13 @@ win_update(win_T *wp)
     }
 
     // End of loop over all window lines.
+
+#ifdef FEAT_SYN_HL
+    // Now that the window has been redrawn with the old and new cursor line,
+    // update w_last_cursorline.
+    wp->w_last_cursorline = wp->w_p_cul ? wp->w_cursor.lnum : 0;
+#endif
+    wp->w_last_cursor_lnum_rnu = wp->w_p_rnu ? wp->w_cursor.lnum : 0;
 
 #ifdef FEAT_VTP
     // Rewrite the character at the end of the screen line.
@@ -2611,8 +2635,8 @@ win_update(win_T *wp)
 	    int scr_row = W_WINROW(wp) + wp->w_height - 1;
 
 	    // Last line isn't finished: Display "@@@" in the last screen line.
-	    screen_puts_len((char_u *)"@@", 2, scr_row, wp->w_wincol,
-							      HL_ATTR(HLF_AT));
+	    screen_puts_len((char_u *)"@@", wp->w_width > 2 ? 2 : wp->w_width,
+				       scr_row, wp->w_wincol, HL_ATTR(HLF_AT));
 	    screen_fill(scr_row, scr_row + 1,
 		    (int)wp->w_wincol + 2, (int)W_ENDCOL(wp),
 		    '@', ' ', HL_ATTR(HLF_AT));
@@ -2621,10 +2645,13 @@ win_update(win_T *wp)
 	}
 	else if (dy_flags & DY_LASTLINE)	// 'display' has "lastline"
 	{
+	    int start_col = (int)W_ENDCOL(wp) - 3;
+
 	    // Last line isn't finished: Display "@@@" at the end.
 	    screen_fill(W_WINROW(wp) + wp->w_height - 1,
 		    W_WINROW(wp) + wp->w_height,
-		    (int)W_ENDCOL(wp) - 3, (int)W_ENDCOL(wp),
+		    start_col < wp->w_wincol ? wp->w_wincol : start_col,
+		    (int)W_ENDCOL(wp),
 		    '@', '@', HL_ATTR(HLF_AT));
 	    set_empty_rows(wp, srow);
 	    wp->w_botline = lnum;
@@ -2646,10 +2673,10 @@ win_update(win_T *wp)
 	    if (j > 0 && !wp->w_botfill)
 	    {
 		// Display filler lines at the end of the file.
-		if (char2cells(fill_diff) > 1)
+		if (char2cells(wp->w_fill_chars.diff) > 1)
 		    i = '-';
 		else
-		    i = fill_diff;
+		    i = wp->w_fill_chars.diff;
 		if (row + j > wp->w_height)
 		    j = wp->w_height - row;
 		win_draw_end(wp, i, i, TRUE, row, row + (int)j, HLF_DED);
@@ -2660,16 +2687,19 @@ win_update(win_T *wp)
 	else if (dollar_vcol == -1)
 	    wp->w_botline = lnum;
 
-	// Make sure the rest of the screen is blank
-	// write the 'fill_eob' character to rows that aren't part of the file
+	// Make sure the rest of the screen is blank.
+	// write the "eob" character from 'fillchars' to rows that aren't part
+	// of the file.
 	if (WIN_IS_POPUP(wp))
 	    win_draw_end(wp, ' ', ' ', FALSE, row, wp->w_height, HLF_AT);
 	else
-	    win_draw_end(wp, fill_eob, ' ', FALSE, row, wp->w_height, HLF_EOB);
+	    win_draw_end(wp, wp->w_fill_chars.eob, ' ', FALSE,
+						   row, wp->w_height, HLF_EOB);
     }
 
 #ifdef SYN_TIME_LIMIT
-    syn_set_timeout(NULL);
+    disable_regexp_timeout();
+    redrawtime_limit_set = FALSE;
 #endif
 
     // Reset the type of redrawing required, the window has been updated.
@@ -2825,7 +2855,7 @@ update_debug_sign(buf_T *buf, linenr_T lnum)
     // Return when there is nothing to do, screen updating is already
     // happening (recursive call), messages on the screen or still starting up.
     if (!doit || updating_screen
-	    || State == ASKMORE || State == HITRETURN
+	    || State == MODE_ASKMORE || State == MODE_HITRETURN
 	    || msg_scrolled
 #ifdef FEAT_GUI
 	    || gui.starting
@@ -2916,7 +2946,8 @@ redraw_asap(int type)
     schar_T	*screenline2 = NULL;	// copy from ScreenLines2[]
 
     redraw_later(type);
-    if (msg_scrolled || (State != NORMAL && State != NORMAL_BUSY) || exiting)
+    if (msg_scrolled || (State != MODE_NORMAL && State != MODE_NORMAL_BUSY)
+								    || exiting)
 	return ret;
 
     // Allocate space to save the text displayed in the command line area.
@@ -3001,7 +3032,7 @@ redraw_asap(int type)
 		    mch_memmove(ScreenLines2 + off,
 				screenline2 + r * cols,
 				(size_t)cols * sizeof(schar_T));
-		screen_line(cmdline_row + r, 0, cols, cols, 0);
+		screen_line(curwin, cmdline_row + r, 0, cols, cols, 0);
 	    }
 	    ret = 4;
 	}
@@ -3040,13 +3071,14 @@ redraw_after_callback(int call_update_screen, int do_message)
 {
     ++redrawing_for_callback;
 
-    if (State == HITRETURN || State == ASKMORE || State == SETWSIZE
-	    || State == EXTERNCMD || State == CONFIRM || exmode_active)
+    if (State == MODE_HITRETURN || State == MODE_ASKMORE
+	    || State == MODE_SETWSIZE || State == MODE_EXTERNCMD
+	    || State == MODE_CONFIRM || exmode_active)
     {
 	if (do_message)
 	    repeat_message();
     }
-    else if (State & CMDLINE)
+    else if (State & MODE_CMDLINE)
     {
 #ifdef FEAT_WILDMENU
 	if (pum_visible())
@@ -3069,8 +3101,11 @@ redraw_after_callback(int call_update_screen, int do_message)
 	    redrawcmdline_ex(FALSE);
 	}
     }
-    else if (State & (NORMAL | INSERT | TERMINAL))
+    else if (State & (MODE_NORMAL | MODE_INSERT | MODE_TERMINAL))
     {
+	update_topline();
+	validate_cursor();
+
 	// keep the command line if possible
 	update_screen(VALID_NO_UPDATE);
 	setcursor();

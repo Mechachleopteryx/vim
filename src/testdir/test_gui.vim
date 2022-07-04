@@ -48,7 +48,9 @@ func Test_colorscheme()
   call assert_equal("\ntorte", execute('colorscheme'))
 
   let a = substitute(execute('hi Search'), "\n\\s\\+", ' ', 'g')
-  call assert_match("\nSearch         xxx term=reverse ctermfg=0 ctermbg=12 gui=bold guifg=Black guibg=Red", a)
+  " FIXME: temporarily check less while the colorscheme changes
+  " call assert_match("\nSearch         xxx term=reverse cterm=reverse ctermfg=196 ctermbg=16 gui=reverse guifg=#ff0000 guibg=#000000", a)
+  call assert_match("\nSearch         xxx term=reverse ", a)
 
   call assert_fails('colorscheme does_not_exist', 'E185:')
 
@@ -63,7 +65,7 @@ endfunc
 func Test_getfontname_with_arg()
   CheckX11BasedGui
 
-  if has('gui_athena') || has('gui_motif')
+  if has('gui_motif')
     " Invalid font name. The result should be an empty string.
     call assert_equal('', getfontname('notexist'))
 
@@ -90,7 +92,7 @@ func Test_getfontname_without_arg()
   if has('gui_kde')
     " 'expected' is the value specified by SetUp() above.
     call assert_equal('Courier 10 Pitch/8/-1/5/50/0/0/0/0/0', fname)
-  elseif has('gui_athena') || has('gui_motif')
+  elseif has('gui_motif')
     " 'expected' is DFLT_FONT of gui_x11.c or its real name.
     let pat = '\(7x13\)\|\(\c-Misc-Fixed-Medium-R-Normal--13-120-75-75-C-70-ISO8859-1\)'
     call assert_match(pat, fname)
@@ -116,9 +118,8 @@ func Test_quoteplus()
 
   let test_call     = 'Can you hear me?'
   let test_response = 'Yes, I can.'
-  let vim_exe = GetVimCommand()
-  let testee = 'VIMRUNTIME=' . $VIMRUNTIME . '; export VIMRUNTIME;'
-        \ . vim_exe . ' --noplugin --not-a-term -c ''%s'''
+  let testee = 'VIMRUNTIME=' .. $VIMRUNTIME .. '; export VIMRUNTIME;'
+        \ .. GetVimCommand() .. ' --noplugin --not-a-term -c ''%s'''
   " Ignore the "failed to create input context" error.
   let cmd = 'call test_ignore_error("E285") | '
         \ . 'gui -f | '
@@ -157,7 +158,12 @@ func Test_gui_read_stdin()
 
   " Cannot use --not-a-term here, the "reading from stdin" message would not be
   " displayed.
-  let vimcmd = substitute(GetVimCommand(), '--not-a-term', '', '')
+  " However, when using XIM we might get E285, do use it then.
+  if has('xim')
+    let vimcmd = GetVimCommand()
+  else
+    let vimcmd = substitute(GetVimCommand(), '--not-a-term', '', '')
+  endif
 
   call system('cat Xstdin | ' .. vimcmd .. ' -f -g -S Xscript -')
   call assert_equal(['some', 'lines'], readfile('XstdinOK'))
@@ -274,7 +280,7 @@ func Test_set_balloonexpr()
     " Multiline balloon using NL
     new
     func MyBalloonFuncForMultilineUsingNL()
-      return "Multiline\nSuppported\nBalloon\nusing NL"
+      return "Multiline\nSupported\nBalloon\nusing NL"
     endfunc
     setl balloonexpr=MyBalloonFuncForMultilineUsingNL()
     setl ballooneval
@@ -289,7 +295,7 @@ func Test_set_balloonexpr()
     " Multiline balloon using List
     new
     func MyBalloonFuncForMultilineUsingList()
-      return [ 'Multiline', 'Suppported', 'Balloon', 'using List' ]
+      return [ 'Multiline', 'Supported', 'Balloon', 'using List' ]
     endfunc
     setl balloonexpr=MyBalloonFuncForMultilineUsingList()
     setl ballooneval
@@ -376,7 +382,7 @@ func Test_set_guifont()
     set guifontset=
   endif
 
-  if has('gui_athena') || has('gui_motif')
+  if has('gui_motif')
     " Non-empty font list with invalid font names.
     "
     " This test is twofold: (1) It checks if the command fails as expected
@@ -514,7 +520,7 @@ func Test_set_guifontwide()
     let &guifontwide = guifontwide_saved
     let &guifont = guifont_saved
 
-  elseif has('gui_athena') || has('gui_motif')
+  elseif has('gui_motif')
     " guifontwide is premised upon the xfontset feature.
     if !has('xfontset')
       let skipped = g:not_supported . 'xfontset'
@@ -549,8 +555,6 @@ func Test_set_guifontwide()
       catch
         call assert_exception('E598:')
       endtry
-      " Set it to an invalid value brutally for preparation.
-      let &guifontset = '-*-notexist-*'
 
       " Case 2-1: Automatic selection
       set guifontwide=
@@ -999,6 +1003,7 @@ func Test_gui_mouse_event()
   call assert_equal(['one two abc three', 'four five posix'], getline(1, '$'))
 
   %d _
+  set scrolloff=0
   call setline(1, range(1, 100))
   " scroll up
   let args = #{button: 0x200, row: 2, col: 1, multiclick: 0, modifiers: 0}
@@ -1014,6 +1019,7 @@ func Test_gui_mouse_event()
   call test_gui_event('mouse', args)
   call feedkeys("H", 'Lx!')
   call assert_equal(4, line('.'))
+  set scrolloff&
 
   %d _
   set nowrap
@@ -1196,6 +1202,91 @@ func Test_gui_mouse_event()
   set mousemodel&
 endfunc
 
+" Move the mouse to the top-left in preparation for mouse events
+func PrepareForMouseEvent(args)
+  call extend(a:args, #{row: 1, col:1})
+  call test_gui_event('mouse', a:args)
+  call feedkeys('', 'Lx!')
+  " on MS-Windows the event may have a slight delay
+  if has('win32')
+    sleep 20m
+  endif
+endfunc
+
+func MouseWasMoved()
+  let pos = getmousepos()
+  call add(g:eventlist, #{row: pos.screenrow, col: pos.screencol})
+endfunc
+
+func Test_gui_mouse_move_event()
+  let args = #{move: 1, button: 0, multiclick: 0, modifiers: 0}
+
+  " by default, does not generate mouse move events
+  set mousemev&
+  call assert_false(&mousemev)
+
+  let g:eventlist = []
+  nnoremap <special> <silent> <MouseMove> :call MouseWasMoved()<CR>
+
+  " start at mouse pos (1,1), clear counter
+  call PrepareForMouseEvent(args)
+  let g:eventlist = []
+
+  call extend(args, #{row: 3, col: 30, cell: v:true})
+  call test_gui_event('mouse', args)
+  call feedkeys('', 'Lx!')
+
+  call extend(args, #{row: 10, col: 30, cell: v:true})
+  call test_gui_event('mouse', args)
+  call feedkeys('', 'Lx!')
+
+  " no events since mousemev off
+  call assert_equal([], g:eventlist)
+
+  " turn on mouse events and try the same thing
+  set mousemev
+  call PrepareForMouseEvent(args)
+  let g:eventlist = []
+
+  call extend(args, #{row: 3, col: 30, cell: v:true})
+  call test_gui_event('mouse', args)
+  call feedkeys('', 'Lx!')
+
+  call extend(args, #{row: 10, col: 30, cell: v:true})
+  call test_gui_event('mouse', args)
+  call feedkeys('', 'Lx!')
+
+  " FIXME: on MS-Windows we get a stray event first
+  if has('win32') && len(g:eventlist) == 3
+    let g:eventlist = g:eventlist[1 : ]
+  endif
+
+  call assert_equal([#{row: 4, col: 31}, #{row: 11, col: 31}], g:eventlist)
+
+  " wiggle the mouse around within a screen cell, shouldn't trigger events
+  call extend(args, #{cell: v:false})
+  call PrepareForMouseEvent(args)
+  let g:eventlist = []
+
+  call extend(args, #{row: 1, col: 2, cell: v:false})
+  call test_gui_event('mouse', args)
+  call feedkeys('', 'Lx!')
+
+  call extend(args, #{row: 2, col: 2, cell: v:false})
+  call test_gui_event('mouse', args)
+  call feedkeys('', 'Lx!')
+
+  call extend(args, #{row: 2, col: 1, cell: v:false})
+  call test_gui_event('mouse', args)
+  call feedkeys('', 'Lx!')
+
+  call assert_equal([], g:eventlist)
+
+  unlet g:eventlist
+  unmap <MouseMove>
+  set mousemev&
+endfunc
+
 " Test for 'guitablabel' and 'guitabtooltip' options
 func TestGuiTabLabel()
   call add(g:TabLabels, v:lnum + 100)
@@ -1210,8 +1301,6 @@ func TestGuiTabToolTip()
 endfunc
 
 func Test_gui_tablabel_tooltip()
-  CheckNotFeature gui_athena
-
   %bw!
   " Removing the tabline at the end of this test, reduces the window height by
   " one. Save and restore it after the test.
@@ -1254,8 +1343,6 @@ endfunc
 
 " Test for dropping files into a window in GUI
 func DropFilesInCmdLine()
-  CheckFeature drop_file
-
   call feedkeys(":\"", 'L')
   let d = #{files: ['a.c', 'b.c'], row: &lines, col: 1, modifiers: 0}
   call test_gui_event('dropfiles', d)
@@ -1429,6 +1516,11 @@ endfunc
 
 " Test for find/replace text dialog event
 func Test_gui_findrepl()
+  " Find/Replace dialog is supported only on GTK, Motif and MS-Windows.
+  if !has('gui_gtk') && !has('gui_motif') && !has('gui_win32')
+    return
+  endif
+
   new
   call setline(1, ['one two one', 'Twoo One two oneo'])
 
@@ -1443,25 +1535,25 @@ func Test_gui_findrepl()
   call test_gui_event('findrepl', args)
   call assert_equal(['ONE TWO ONE', 'Twoo ONE TWO ONEo'], getline(1, '$'))
 
-  " Find next occurance of a string (in a find dialog)
+  " Find next occurrence of a string (in a find dialog)
   call cursor(1, 11)
   let args = #{find_text: 'TWO', repl_text: '', flags: 0x11, forward: 1}
   call test_gui_event('findrepl', args)
   call assert_equal([2, 10], [line('.'), col('.')])
 
-  " Find previous occurances of a string (in a find dialog)
+  " Find previous occurrences of a string (in a find dialog)
   call cursor(1, 11)
   let args = #{find_text: 'TWO', repl_text: '', flags: 0x11, forward: 0}
   call test_gui_event('findrepl', args)
   call assert_equal([1, 5], [line('.'), col('.')])
 
-  " Find next occurance of a string (in a replace dialog)
+  " Find next occurrence of a string (in a replace dialog)
   call cursor(1, 1)
   let args = #{find_text: 'Twoo', repl_text: '', flags: 0x2, forward: 1}
   call test_gui_event('findrepl', args)
   call assert_equal([2, 1], [line('.'), col('.')])
 
-  " Replace only the next occurance of a string (once)
+  " Replace only the next occurrence of a string (once)
   call cursor(1, 5)
   let args = #{find_text: 'TWO', repl_text: 'two', flags: 0x3, forward: 1}
   call test_gui_event('findrepl', args)
@@ -1485,6 +1577,33 @@ func Test_gui_findrepl()
   call assert_false(test_gui_event('findrepl', args))
 
   bw!
+endfunc
+
+func Test_gui_CTRL_SHIFT_V()
+  call feedkeys(":let g:str = '\<*C-S-V>\<*C-S-I>\<*C-S-V>\<*C-S-@>'\<CR>", 'tx')
+  call assert_equal('<C-S-I><C-S-@>', g:str)
+  unlet g:str
+endfunc
+
+func Test_gui_dialog_file()
+  let lines =<< trim END
+    file Xfile
+    normal axxx
+    confirm qa
+  END
+  call writefile(lines, 'Xlines')
+  let prefix = '!'
+  if has('win32')
+    let prefix = '!start '
+  endif
+  execute prefix .. GetVimCommand() .. ' -g -f --clean --gui-dialog-file Xdialog -S Xlines'
+
+  call WaitForAssert({-> assert_true(filereadable('Xdialog'))})
+  call assert_match('Question: Save changes to "Xfile"?', readfile('Xdialog')->join('<NL>'))
+
+  call delete('Xdialog')
+  call delete('Xfile')
+  call delete('Xlines')
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

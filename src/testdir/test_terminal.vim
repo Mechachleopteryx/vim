@@ -715,7 +715,8 @@ endfunction
 func Test_terminal_noblock()
   let g:test_is_flaky = 1
   let buf = term_start(&shell)
-  let wait_time = 5000
+  " Starting a terminal can be slow, esp. on busy CI machines.
+  let wait_time = 7500
   let letters = 'abcdefghijklmnopqrstuvwxyz'
   if has('bsd') || has('mac') || has('sun')
     " The shell or something else has a problem dealing with more than 1000
@@ -756,6 +757,7 @@ func Test_terminal_write_stdin()
   " TODO: enable once writing to stdin works on MS-Windows
   CheckNotMSWindows
   CheckExecutable wc
+  let g:test_is_flaky = 1
 
   call setline(1, ['one', 'two', 'three'])
   %term wc
@@ -774,6 +776,7 @@ endfunc
 
 func Test_terminal_eof_arg()
   call CheckPython(s:python)
+  let g:test_is_flaky = 1
 
   call setline(1, ['print("hello")'])
   exe '1term ++eof=exit(123) ' .. s:python
@@ -792,6 +795,7 @@ endfunc
 func Test_terminal_eof_arg_win32_ctrl_z()
   CheckMSWindows
   call CheckPython(s:python)
+  let g:test_is_flaky = 1
 
   call setline(1, ['print("hello")'])
   exe '1term ++eof=<C-Z> ' .. s:python
@@ -802,8 +806,9 @@ endfunc
 
 func Test_terminal_duplicate_eof_arg()
   call CheckPython(s:python)
+  let g:test_is_flaky = 1
 
-  " Check the last specified ++eof arg is used and should not memory leak.
+  " Check the last specified ++eof arg is used and does not leak memory.
   new
   call setline(1, ['print("hello")'])
   exe '1term ++eof=<C-Z> ++eof=exit(123) ' .. s:python
@@ -934,7 +939,7 @@ func TerminalTmap(remap)
   tunmap 123
   tunmap 456
   call assert_equal('', maparg('123', 't'))
-  close
+  exe buf . 'bwipe'
   unlet g:job
 endfunc
 
@@ -1217,7 +1222,11 @@ endfunc
 " argument, check that :confirm qall works.
 func Test_terminal_qall_prompt()
   CheckRunVimInTerminal
+
   let buf = RunVimInTerminal('', {})
+
+  " the shell may set the window title, we don't want that here
+  call term_sendkeys(buf, ":call test_override('vterm_title', 1)\<CR>")
 
   " Open a terminal window and wait for the prompt to appear
   call term_sendkeys(buf, ":term\<CR>")
@@ -2011,10 +2020,16 @@ func Test_terminal_ansicolors_global()
   CheckFeature termguicolors
   CheckFunction term_getansicolors
 
+  if has('vtp') && !has('vcon') && !has('gui_running')
+    throw 'Skipped: does not support termguicolors'
+  endif
+
+  set tgc
   let g:terminal_ansi_colors = reverse(copy(s:test_colors))
   let buf = Run_shell_in_terminal({})
   call assert_equal(g:terminal_ansi_colors, term_getansicolors(buf))
   call StopShellInTerminal(buf)
+  set tgc&
 
   exe buf . 'bwipe'
   unlet g:terminal_ansi_colors
@@ -2024,6 +2039,11 @@ func Test_terminal_ansicolors_func()
   CheckFeature termguicolors
   CheckFunction term_getansicolors
 
+  if has('vtp') && !has('vcon') && !has('gui_running')
+    throw 'Skipped: does not support termguicolors'
+  endif
+
+  set tgc
   let g:terminal_ansi_colors = reverse(copy(s:test_colors))
   let buf = Run_shell_in_terminal({'ansi_colors': s:test_colors})
   call assert_equal(s:test_colors, term_getansicolors(buf))
@@ -2046,6 +2066,7 @@ func Test_terminal_ansicolors_func()
   let colors[4] = 'Invalid'
   call assert_fails('call term_setansicolors(buf, colors)', 'E254:')
   call assert_fails('call term_setansicolors(buf, {})', 'E714:')
+  set tgc&
 
   call StopShellInTerminal(buf)
   call assert_equal(0, term_setansicolors(buf, []))

@@ -244,48 +244,44 @@ alloc_func_type(type_T *ret_type, int argcount, garray_T *type_gap)
 
 /*
  * Get a function type, based on the return type "ret_type".
- * If "argcount" is -1 or 0 a predefined type can be used.
- * If "argcount" > 0 always create a new type, so that arguments can be added.
+ * "argcount" must be -1 or 0, a predefined type can be used.
  */
     type_T *
 get_func_type(type_T *ret_type, int argcount, garray_T *type_gap)
 {
     // recognize commonly used types
-    if (argcount <= 0)
+    if (ret_type == &t_unknown || ret_type == NULL)
     {
-	if (ret_type == &t_unknown || ret_type == NULL)
-	{
-	    // (argcount == 0) is not possible
-	    return &t_func_unknown;
-	}
-	if (ret_type == &t_void)
-	{
-	    if (argcount == 0)
-		return &t_func_0_void;
-	    else
-		return &t_func_void;
-	}
-	if (ret_type == &t_any)
-	{
-	    if (argcount == 0)
-		return &t_func_0_any;
-	    else
-		return &t_func_any;
-	}
-	if (ret_type == &t_number)
-	{
-	    if (argcount == 0)
-		return &t_func_0_number;
-	    else
-		return &t_func_number;
-	}
-	if (ret_type == &t_string)
-	{
-	    if (argcount == 0)
-		return &t_func_0_string;
-	    else
-		return &t_func_string;
-	}
+	// (argcount == 0) is not possible
+	return &t_func_unknown;
+    }
+    if (ret_type == &t_void)
+    {
+	if (argcount == 0)
+	    return &t_func_0_void;
+	else
+	    return &t_func_void;
+    }
+    if (ret_type == &t_any)
+    {
+	if (argcount == 0)
+	    return &t_func_0_any;
+	else
+	    return &t_func_any;
+    }
+    if (ret_type == &t_number)
+    {
+	if (argcount == 0)
+	    return &t_func_0_number;
+	else
+	    return &t_func_number;
+    }
+    if (ret_type == &t_string)
+    {
+	if (argcount == 0)
+	    return &t_func_0_string;
+	else
+	    return &t_func_string;
     }
 
     return alloc_func_type(ret_type, argcount, type_gap);
@@ -337,7 +333,11 @@ typval2type_int(typval_T *tv, int copyID, garray_T *type_gap, int flags)
     if (tv->v_type == VAR_STRING)
 	return &t_string;
     if (tv->v_type == VAR_BLOB)
+    {
+	if (tv->vval.v_blob == NULL)
+	    return &t_blob_null;
 	return &t_blob;
+    }
 
     if (tv->v_type == VAR_LIST)
     {
@@ -420,6 +420,8 @@ typval2type_int(typval_T *tv, int copyID, garray_T *type_gap, int flags)
 	}
 	else
 	    name = tv->vval.v_string;
+	if (name == NULL && ufunc == NULL)
+	    return &t_func_unknown;
 	if (name != NULL)
 	{
 	    int idx = find_internal_func(name);
@@ -457,7 +459,7 @@ typval2type_int(typval_T *tv, int copyID, garray_T *type_gap, int flags)
 		    {
 			type->tt_argcount -= tv->vval.v_partial->pt_argc;
 			type->tt_min_argcount -= tv->vval.v_partial->pt_argc;
-			if (type->tt_argcount == 0)
+			if (type->tt_argcount <= 0)
 			    type->tt_args = NULL;
 			else
 			{
@@ -535,7 +537,7 @@ typval2type_vimvar(typval_T *tv, garray_T *type_gap)
 {
     if (tv->v_type == VAR_LIST)  // e.g. for v:oldfiles
 	return &t_list_string;
-    if (tv->v_type == VAR_DICT)  // e.g. for v:completed_item
+    if (tv->v_type == VAR_DICT)  // e.g. for v:event
 	return &t_dict_any;
     return typval2type(tv, get_copyID(), type_gap, TVTT_DO_MEMBER);
 }
@@ -567,22 +569,19 @@ check_typval_type(type_T *expected, typval_T *actual_tv, where_T where)
 
     if (expected == NULL)
 	return OK;  // didn't expect anything.
+		    //
+    ga_init2(&type_list, sizeof(type_T *), 10);
 
-    // For some values there is no type, assume an error will be given later
-    // for an invalid value.
+    // A null_function and null_partial are special cases, they can be used to
+    // clear a variable.
     if ((actual_tv->v_type == VAR_FUNC && actual_tv->vval.v_string == NULL)
 	    || (actual_tv->v_type == VAR_PARTIAL
 					 && actual_tv->vval.v_partial == NULL))
-    {
-	emsg(_(e_function_reference_is_not_set));
-	return FAIL;
-    }
-
-    ga_init2(&type_list, sizeof(type_T *), 10);
-
-    // When the actual type is list<any> or dict<any> go through the values to
-    // possibly get a more specific type.
-    actual_type = typval2type(actual_tv, get_copyID(), &type_list,
+	actual_type = &t_func_unknown;
+    else
+	// When the actual type is list<any> or dict<any> go through the values
+	// to possibly get a more specific type.
+	actual_type = typval2type(actual_tv, get_copyID(), &type_list,
 					  TVTT_DO_MEMBER | TVTT_MORE_SPECIFIC);
     if (actual_type != NULL)
     {
@@ -777,12 +776,12 @@ check_argument_types(
 	return OK;  // just in case
     if (totcount < type->tt_min_argcount - varargs)
     {
-	semsg(_(e_not_enough_arguments_for_function_str), name);
+	emsg_funcname(e_not_enough_arguments_for_function_str, name);
 	return FAIL;
     }
     if (!varargs && type->tt_argcount >= 0 && totcount > type->tt_argcount)
     {
-	semsg(_(e_too_many_arguments_for_function_str), name);
+	emsg_funcname(e_too_many_arguments_for_function_str, name);
 	return FAIL;
     }
     if (type->tt_args == NULL)
@@ -804,7 +803,11 @@ check_argument_types(
 	else
 	    tv = &argvars[i];
 	if (varargs && i >= type->tt_argcount - 1)
-	    expected = type->tt_args[type->tt_argcount - 1]->tt_member;
+	{
+	    expected = type->tt_args[type->tt_argcount - 1];
+	    if (expected != NULL)
+		expected = expected->tt_member;
+	}
 	else
 	    expected = type->tt_args[i];
 	if (check_typval_arg_type(expected, tv, NULL, i + 1) == FAIL)
@@ -1236,6 +1239,19 @@ common_type(type_T *type1, type_T *type2, type_T **dest, garray_T *type_gap)
 	{
 	    type_T *common;
 
+	    // When one of the types is t_func_unknown return the other one.
+	    // Useful if a list or dict item is null_func.
+	    if (type1 == &t_func_unknown)
+	    {
+		*dest = type2;
+		return;
+	    }
+	    if (type2 == &t_func_unknown)
+	    {
+		*dest = type1;
+		return;
+	    }
+
 	    common_type(type1->tt_member, type2->tt_member, &common, type_gap);
 	    if (type1->tt_argcount == type2->tt_argcount
 						    && type1->tt_argcount >= 0)
@@ -1421,6 +1437,7 @@ vartype_name(vartype_T type)
 type_name(type_T *type, char **tofree)
 {
     char *name;
+    char *arg_free = NULL;
 
     *tofree = NULL;
     if (type == NULL)
@@ -1449,13 +1466,12 @@ type_name(type_T *type, char **tofree)
 
 	ga_init2(&ga, 1, 100);
 	if (ga_grow(&ga, 20) == FAIL)
-	    return "[unknown]";
+	    goto failed;
 	STRCPY(ga.ga_data, "func(");
 	ga.ga_len += 5;
 
 	for (i = 0; i < type->tt_argcount; ++i)
 	{
-	    char *arg_free = NULL;
 	    char *arg_type;
 	    int  len;
 
@@ -1470,17 +1486,13 @@ type_name(type_T *type, char **tofree)
 	    }
 	    len = (int)STRLEN(arg_type);
 	    if (ga_grow(&ga, len + 8) == FAIL)
-	    {
-		vim_free(arg_free);
-		ga_clear(&ga);
-		return "[unknown]";
-	    }
+		goto failed;
 	    if (varargs && i == type->tt_argcount - 1)
 		ga_concat(&ga, (char_u *)"...");
 	    else if (i >= type->tt_min_argcount)
 		*((char *)ga.ga_data + ga.ga_len++) = '?';
 	    ga_concat(&ga, (char_u *)arg_type);
-	    vim_free(arg_free);
+	    VIM_CLEAR(arg_free);
 	}
 	if (type->tt_argcount < 0)
 	    // any number of arguments
@@ -1496,17 +1508,18 @@ type_name(type_T *type, char **tofree)
 
 	    len = (int)STRLEN(ret_name) + 4;
 	    if (ga_grow(&ga, len) == FAIL)
-	    {
-		vim_free(ret_free);
-		ga_clear(&ga);
-		return "[unknown]";
-	    }
+		goto failed;
 	    STRCPY((char *)ga.ga_data + ga.ga_len, "): ");
 	    STRCPY((char *)ga.ga_data + ga.ga_len + 3, ret_name);
 	    vim_free(ret_free);
 	}
 	*tofree = ga.ga_data;
 	return ga.ga_data;
+
+failed:
+	vim_free(arg_free);
+	ga_clear(&ga);
+	return "[unknown]";
     }
 
     return name;
